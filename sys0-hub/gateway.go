@@ -25,8 +25,23 @@ func (h *Hub) serveAgent(conn transport.Conn) {
 		h.reg.removeNode(sess)
 		h.store.SetNodeState(id, "offline")
 		h.reg.broadcast("node", "event.node", map[string]any{"event": "offline", "id": id})
+		sess.mu.Lock()
+		label := sess.label
+		sess.mu.Unlock()
+		h.auditNode(id, "node.offline", label, conn.RemoteAddr())
 		h.log.Info("node offline", "nodeId", id, "err", err)
 	}
+}
+
+// auditNode records a node connect/disconnect event into the audit log.
+func (h *Hub) auditNode(id, method, label, addr string) {
+	sel, _ := json.Marshal(map[string]string{"label": label, "addr": addr})
+	now := time.Now().Unix()
+	outcome := "online"
+	if method == "node.offline" {
+		outcome = "offline"
+	}
+	h.store.InsertAudit("node", id, method, string(sel), "", 0, false, outcome, now, now)
 }
 
 // handleRequest answers inbound requests from the agent (only node.hello).
@@ -65,6 +80,7 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 
 	n.hub.log.Info("node online", "nodeId", id, "label", hello.Label, "addr", n.conn.RemoteAddr())
 	n.hub.reg.broadcast("node", "event.node", map[string]any{"event": "online", "node": n.view()})
+	n.hub.auditNode(id, "node.online", hello.Label, n.conn.RemoteAddr())
 
 	return wire.Welcome{NodeID: id, Heartbeat: 15}, nil
 }
