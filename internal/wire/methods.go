@@ -8,6 +8,7 @@ type MethodSpec struct {
 	Scope        string         `json:"scope"` // "node" or "hub"
 	Description  string         `json:"description"`
 	Dangerous    bool           `json:"dangerous"`
+	Interactive  bool           `json:"interactive"` // streaming/PTY; not for the generic form
 	ParamsSchema map[string]any `json:"paramsSchema"`
 	ResultSchema map[string]any `json:"resultSchema,omitempty"`
 }
@@ -35,6 +36,26 @@ var NodeMethods = []MethodSpec{
 			"timeout": intg(),
 		}, "cmd"),
 		ResultSchema: obj(map[string]any{"stdout": str(), "stderr": str(), "exit": intg()}),
+	},
+	{
+		Name: MethodShellOpen, Scope: "node", Dangerous: true, Interactive: true,
+		Description:  "打开一个交互式 PTY shell 会话（透传系统控制台），输出经 emit 流式推送。",
+		ParamsSchema: obj(map[string]any{"shell": str(), "cols": intg(), "rows": intg()}),
+	},
+	{
+		Name: MethodShellInput, Scope: "node", Dangerous: true, Interactive: true,
+		Description:  "向交互式 shell 会话写入输入（base64）。",
+		ParamsSchema: obj(map[string]any{"session": str(), "data": str()}, "session", "data"),
+	},
+	{
+		Name: MethodShellResize, Scope: "node", Interactive: true,
+		Description:  "调整交互式 shell 会话的终端尺寸。",
+		ParamsSchema: obj(map[string]any{"session": str(), "cols": intg(), "rows": intg()}, "session"),
+	},
+	{
+		Name: MethodShellClose, Scope: "node", Interactive: true,
+		Description:  "关闭交互式 shell 会话。",
+		ParamsSchema: obj(map[string]any{"session": str()}, "session"),
 	},
 	{
 		Name: MethodHostInfo, Scope: "node",

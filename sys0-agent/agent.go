@@ -39,6 +39,7 @@ type Agent struct {
 	nodeID      string
 	peer        *rpc.Peer
 	watchStop   chan struct{}
+	shells      *shellManager
 
 	reconnect chan struct{}
 	quit      bool
@@ -54,6 +55,7 @@ func NewAgent(cfg Config, log *slog.Logger) *Agent {
 		cfg: cfg, log: log,
 		label: cfg.Label, heartbeat: hb,
 		fingerprint: fingerprint(cfg.Label),
+		shells:      newShellManager(),
 		reconnect:   make(chan struct{}, 1),
 	}
 }
@@ -172,6 +174,14 @@ func (a *Agent) handle(ctx context.Context, method string, params json.RawMessag
 	switch method {
 	case wire.MethodShellRun:
 		return a.doShellRun(ctx, params)
+	case wire.MethodShellOpen:
+		return a.doShellOpen(params)
+	case wire.MethodShellInput:
+		return a.doShellInput(params)
+	case wire.MethodShellResize:
+		return a.doShellResize(params)
+	case wire.MethodShellClose:
+		return a.doShellClose(params)
 	case wire.MethodHostInfo:
 		return hostInfo(), nil
 	case wire.MethodHostMetrics:

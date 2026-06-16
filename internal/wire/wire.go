@@ -16,6 +16,10 @@ const (
 
 	// node capabilities (invoked via dispatch)
 	MethodShellRun    = "shell.run"
+	MethodShellOpen   = "shell.open" // interactive PTY session
+	MethodShellInput  = "shell.input"
+	MethodShellResize = "shell.resize"
+	MethodShellClose  = "shell.close"
 	MethodHostInfo    = "host.info"
 	MethodHostMetrics = "host.metrics"
 	MethodHostWatch   = "host.watch"
@@ -64,6 +68,33 @@ type ShellRunResult struct {
 	Stdout string `json:"stdout"`
 	Stderr string `json:"stderr"`
 	Exit   int    `json:"exit"`
+}
+
+// interactive PTY shell
+
+type ShellOpenParams struct {
+	Shell string `json:"shell,omitempty"` // bash, sh; default auto
+	Cols  int    `json:"cols,omitempty"`
+	Rows  int    `json:"rows,omitempty"`
+}
+
+type ShellOpenResult struct {
+	Session string `json:"session"`
+}
+
+type ShellInputParams struct {
+	Session string `json:"session"`
+	Data    string `json:"data"` // base64 of raw bytes to stdin
+}
+
+type ShellResizeParams struct {
+	Session string `json:"session"`
+	Cols    int    `json:"cols"`
+	Rows    int    `json:"rows"`
+}
+
+type ShellCloseParams struct {
+	Session string `json:"session"`
 }
 
 // ---- host ----

@@ -59,6 +59,8 @@ func (h *Hub) Router() http.Handler {
 	mux.HandleFunc("GET /api/v1/methods", h.apiMethods)
 	mux.HandleFunc("GET /api/v1/nodes", h.guard(h.apiNodes))
 	mux.HandleFunc("GET /api/v1/nodes/{id}", h.guard(h.apiNode))
+	mux.HandleFunc("POST /api/v1/nodes/{id}/label", h.guard(h.apiNodeLabel))
+	mux.HandleFunc("POST /api/v1/nodes/{id}/detach", h.guard(h.apiNodeDetach))
 	mux.HandleFunc("POST /api/v1/dispatch", h.guard(h.apiDispatch))
 	mux.HandleFunc("GET /api/v1/metrics", h.guard(h.apiMetrics))
 	mux.HandleFunc("GET /api/v1/audit", h.guard(h.apiAudit))
@@ -141,6 +143,42 @@ func (h *Hub) apiNode(w http.ResponseWriter, r *http.Request, _ Actor) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "node": s.view()})
+}
+
+func (h *Hub) apiNodeLabel(w http.ResponseWriter, r *http.Request, _ Actor) {
+	var body struct {
+		Label string   `json:"label"`
+		Tags  []string `json:"tags"`
+	}
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeErr(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	id := r.PathValue("id")
+	s := h.reg.get(id)
+	if s == nil {
+		writeErr(w, http.StatusNotFound, "node offline")
+		return
+	}
+	s.mu.Lock()
+	if body.Label != "" {
+		s.label = body.Label
+	}
+	if body.Tags != nil {
+		s.tags = body.Tags
+	}
+	label, tags := s.label, s.tags
+	s.mu.Unlock()
+	h.store.SetNodeLabelTags(id, label, strings.Join(tags, ","))
+	h.reg.broadcast("node", "event.node", map[string]any{"event": "updated", "id": id})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *Hub) apiNodeDetach(w http.ResponseWriter, r *http.Request, _ Actor) {
+	if s := h.reg.get(r.PathValue("id")); s != nil {
+		s.peer.Close()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (h *Hub) apiDispatch(w http.ResponseWriter, r *http.Request, actor Actor) {

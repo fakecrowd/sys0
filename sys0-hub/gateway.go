@@ -95,6 +95,13 @@ func (n *nodeSession) handleNotify(method string, params json.RawMessage) {
 				n.hub.reg.broadcast("metrics", "event.metrics", map[string]any{"node": id, "metrics": m})
 			}
 		}
+		if e.Chan == "shell" {
+			var d map[string]any
+			if json.Unmarshal(e.Data, &d) == nil {
+				d["node"] = id
+				n.hub.reg.broadcast("shell", "event.shell", d)
+			}
+		}
 	}
 }
 
