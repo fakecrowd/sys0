@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+  --bg: #0a0e0f;
+  --panel: #0f1417;
+  --panel-2: #131a1e;
+  --border: #1d272c;
+  --fg: #c8d3d6;
+  --muted: #6b7d82;
+  --accent: #38e07b;   /* terminal green */
+  --accent-2: #2dd4bf; /* cyan */
+  --danger: #f87171;
+  --warn: #fbbf24;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 80% -10%, #0d1a14 0%, transparent 60%),
+    var(--bg);
+  color: var(--fg);
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo,
+    Consolas, monospace;
+  font-size: 13px;
+  letter-spacing: 0.01em;
+}
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-thumb { background: #1f2a2f; border-radius: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+@layer components {
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--fg); cursor: pointer;
+    font-family: inherit; font-size: 12px; transition: all .12s ease;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-accent { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: var(--accent); color: var(--accent); }
+  .btn-accent:hover { background: color-mix(in srgb, var(--accent) 26%, transparent); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .input {
+    width: 100%; padding: 7px 10px; border-radius: 6px;
+    background: #0b1013; border: 1px solid var(--border); color: var(--fg);
+    font-family: inherit; font-size: 13px; outline: none;
+  }
+  .input:focus { border-color: var(--accent); }
+  .tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--muted); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .mono-sm { font-size: 11px; color: var(--muted); }
+}

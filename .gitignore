@@ -1,0 +1,13 @@
+# build artifacts
+/bin/
+*.db
+*.db-*
+*.log
+
+# node
+node_modules/
+sys0-console/dist/
+sys0-console/tsconfig.tsbuildinfo
+
+# go
+/vendor/
