@@ -1,17 +1,46 @@
-name: Release
+name: Rolling Release
 
-# When a GitHub Release is published, build executables for every supported
-# OS/arch and attach the archives to the release.
+# Rolling release: every push to main is published as a release versioned with
+# the build timestamp (yyyyMMddhhmm).
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+
+  create-release:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release ${{ needs.version.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes "Rolling release · build $VERSION · commit ${GITHUB_SHA:0:7}" \
+            --latest
+
   build:
-    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    needs: [version, create-release]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -42,15 +71,16 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          TAG: ${{ github.event.release.tag_name }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -e
           ext=""
           [ "$GOOS" = "windows" ] && ext=".exe"
-          dist="sys0_${TAG}_${GOOS}_${GOARCH}"
+          ldflags="-s -w -X main.version=$VERSION"
+          dist="sys0_${VERSION}_${GOOS}_${GOARCH}"
           mkdir -p "$dist"
-          go build -trimpath -ldflags "-s -w" -o "$dist/sys0-hub$ext" ./sys0-hub
-          go build -trimpath -ldflags "-s -w" -o "$dist/sys0-agent$ext" ./sys0-agent
+          go build -trimpath -ldflags "$ldflags" -o "$dist/sys0-hub$ext" ./sys0-hub
+          go build -trimpath -ldflags "$ldflags" -o "$dist/sys0-agent$ext" ./sys0-agent
           cp README.md "$dist/" 2>/dev/null || true
           if [ "$GOOS" = "windows" ]; then
             zip -r "$dist.zip" "$dist"
@@ -63,5 +93,5 @@ jobs:
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" "$ASSET" --clobber
+          VERSION: ${{ needs.version.outputs.version }}
+        run: gh release upload "$VERSION" "$ASSET" --clobber

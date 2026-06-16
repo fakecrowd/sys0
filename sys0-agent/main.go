@@ -41,7 +41,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Info("sys0-agent starting", "hub", cfg.Hub, "transport", cfg.Transport,
+	log.Info("sys0-agent starting", "version", version, "hub", cfg.Hub, "transport", cfg.Transport,
 		"label", cfg.Label, "id", fingerprint[:8], "dataDir", dataDir)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

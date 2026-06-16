@@ -1,6 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
 import { api, getToken, getRole, setSession, clearSession, eventStream, type Node } from "./api";
-import { Terminal } from "./components/Terminal";
 import { Shell } from "./components/Shell";
 import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
@@ -58,7 +57,7 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
 }
 
 const TABS = [
-  ["terminal", "终端"], ["shell", "Shell"], ["tasks", "任务"], ["proc", "进程"], ["files", "文件"],
+  ["shell", "Shell"], ["tasks", "任务"], ["proc", "进程"], ["files", "文件"],
   ["monitor", "监控"], ["actions", "动作"], ["audit", "审计"], ["keys", "密钥"],
 ] as const;
 type Tab = (typeof TABS)[number][0];
@@ -66,7 +65,7 @@ type Tab = (typeof TABS)[number][0];
 function Console({ onLogout }: { onLogout: () => void }) {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [tab, setTab] = useState<Tab>("terminal");
+  const [tab, setTab] = useState<Tab>("shell");
   const [live, setLive] = useState<Record<string, any>>({});
   const isAdmin = getRole() === "admin";
 
@@ -116,7 +115,6 @@ function Console({ onLogout }: { onLogout: () => void }) {
             ))}
           </nav>
           <div className="flex-1 p-3 min-h-0 overflow-auto">
-            {tab === "terminal" && <Terminal targets={targets} allCount={nodes.length} />}
             {tab === "shell" && <Shell nodes={nodes} primary={primary} />}
             {tab === "tasks" && <Tasks nodes={nodes} primary={primary} />}
             {tab === "proc" && <Processes nodes={nodes} primary={primary} />}

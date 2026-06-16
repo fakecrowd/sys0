@@ -1,5 +1,9 @@
 .PHONY: all web hub agent build test e2e run-hub run-agent clean
 
+# Rolling version: build timestamp yyyyMMddhhmm
+VERSION ?= $(shell date -u +%Y%m%d%H%M)
+LDFLAGS := -s -w -X main.version=$(VERSION)
+
 all: build
 
 # Build the web console into sys0-hub/web (embedded by the hub binary).
@@ -7,10 +11,10 @@ web:
 	cd sys0-console && npm install && npm run build
 
 hub:
-	go build -o bin/sys0-hub ./sys0-hub/
+	go build -ldflags "$(LDFLAGS)" -o bin/sys0-hub ./sys0-hub/
 
 agent:
-	go build -o bin/sys0-agent ./sys0-agent/
+	go build -ldflags "$(LDFLAGS)" -o bin/sys0-agent ./sys0-agent/
 
 # Full build: console first (so go:embed picks up fresh assets), then binaries.
 build: web hub agent

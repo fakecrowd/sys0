@@ -13,7 +13,8 @@ import (
 	"time"
 )
 
-const hubVersion = "0.1.0"
+// version is the build version (yyyyMMddhhmm), injected via -ldflags.
+var version = "dev"
 
 func main() {
 	cfg := HubConfig{}
@@ -62,7 +63,7 @@ func main() {
 		srv.Shutdown(sctx)
 	}()
 
-	log.Info("sys0-hub listening", "http", cfg.HTTP, "agentTCP", cfg.AgentTCP)
+	log.Info("sys0-hub listening", "version", version, "http", cfg.HTTP, "agentTCP", cfg.AgentTCP)
 	log.Info("default login", "user", "admin", "pass", adminPass)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("http server", "err", err)

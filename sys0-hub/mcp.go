@@ -34,7 +34,7 @@ func (h *Hub) mcpHandler(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, jrpcOK(req.ID, map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}, "resources": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "sys0-hub", "version": hubVersion},
+			"serverInfo":      map[string]any{"name": "sys0-hub", "version": version},
 		}))
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)

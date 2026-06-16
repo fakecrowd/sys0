@@ -13,7 +13,8 @@ import (
 	"github.com/fakecrowd/sys0/internal/wire"
 )
 
-const agentVersion = "0.1.0"
+// version is the build version (yyyyMMddhhmm), injected via -ldflags.
+var version = "dev"
 
 // Config holds agent runtime configuration.
 type Config struct {
@@ -111,7 +112,7 @@ func (a *Agent) session(ctx context.Context) error {
 	hello := wire.Hello{
 		Key: a.cfg.Key, Fingerprint: a.fingerprint, Label: a.label,
 		Host:         wire.HostSummary{Name: hi.Hostname, OS: hi.OS, Arch: hi.Arch, Kernel: hi.Kernel, IP: hi.IP},
-		AgentVersion: agentVersion,
+		AgentVersion: version,
 		Capabilities: capabilities(),
 	}
 	hctx, hcancel := context.WithTimeout(sctx, 10*time.Second)
