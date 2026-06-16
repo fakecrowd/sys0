@@ -8,12 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
-	"syscall"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/fakecrowd/sys0/internal/rpc"
 	"github.com/fakecrowd/sys0/internal/wire"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
 func decode(params json.RawMessage, v any) *rpc.Error {
@@ -40,7 +41,7 @@ func (a *Agent) doShellRun(ctx context.Context, params json.RawMessage) (any, *r
 	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "sh", "-c", p.Cmd)
+	cmd := shellCommand(cctx, p.Cmd)
 	if p.Cwd != "" {
 		cmd.Dir = p.Cwd
 	}
@@ -67,17 +68,28 @@ func (a *Agent) doProcSignal(params json.RawMessage) (any, *rpc.Error) {
 	if e := decode(params, &p); e != nil {
 		return nil, e
 	}
-	sig := map[string]syscall.Signal{
-		"TERM": syscall.SIGTERM, "KILL": syscall.SIGKILL,
-		"INT": syscall.SIGINT, "HUP": syscall.SIGHUP, "": syscall.SIGTERM,
-	}[p.Sig]
-	if sig == 0 {
-		return nil, rpc.Errorf(rpc.CodeBadParams, "unknown signal %q", p.Sig)
+	proc, err := process.NewProcess(int32(p.PID))
+	if err != nil {
+		return nil, rpc.Errorf(rpc.CodeBadParams, "no such process %d", p.PID)
 	}
-	if err := syscall.Kill(p.PID, sig); err != nil {
+	switch strings.ToUpper(p.Sig) {
+	case "KILL":
+		err = proc.Kill()
+	default: // TERM/INT/HUP -> graceful terminate (cross-platform)
+		err = proc.Terminate()
+	}
+	if err != nil {
 		return nil, rpc.Errorf(rpc.CodeInternal, "%v", err)
 	}
 	return wire.OKResult{OK: true}, nil
+}
+
+// shellCommand builds a non-interactive shell invocation for the current OS.
+func shellCommand(ctx context.Context, cmdline string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return exec.CommandContext(ctx, "cmd", "/c", cmdline)
+	}
+	return exec.CommandContext(ctx, "sh", "-c", cmdline)
 }
 
 func (a *Agent) doFsLs(params json.RawMessage) (any, *rpc.Error) {
@@ -168,5 +180,3 @@ func (a *Agent) doFsRm(params json.RawMessage) (any, *rpc.Error) {
 	}
 	return wire.OKResult{OK: true}, nil
 }
-
-func atoiSafe(s string) int { n, _ := strconv.Atoi(s); return n }

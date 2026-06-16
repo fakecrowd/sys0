@@ -1,204 +1,90 @@
 package main
 
 import (
-	"bufio"
 	"net"
 	"os"
-	"os/user"
-	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/fakecrowd/sys0/internal/wire"
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
+	gnet "github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
 )
 
-// hostInfo collects static host facts from the OS and /proc.
+// hostInfo collects static host facts (cross-platform via gopsutil).
 func hostInfo() wire.HostInfoResult {
 	r := wire.HostInfoResult{
-		OS:       runtime.GOOS,
-		Arch:     runtime.GOARCH,
-		CPUCount: runtime.NumCPU(),
-		IP:       outboundIP(),
+		OS: runtime.GOOS, Arch: runtime.GOARCH,
+		CPUCount: runtime.NumCPU(), IP: outboundIP(),
 	}
 	r.Hostname, _ = os.Hostname()
-	r.Kernel = strings.TrimSpace(readFile("/proc/sys/kernel/osrelease"))
-	r.CPUModel = cpuModel()
-	r.MemTotal = meminfoKB("MemTotal") * 1024
-	if f := strings.Fields(readFile("/proc/uptime")); len(f) > 0 {
-		r.UptimeSec, _ = strconv.ParseFloat(f[0], 64)
+	if h, err := host.Info(); err == nil {
+		r.Kernel = h.KernelVersion
+		r.UptimeSec = float64(h.Uptime)
+		if r.Hostname == "" {
+			r.Hostname = h.Hostname
+		}
+	}
+	if ci, err := cpu.Info(); err == nil && len(ci) > 0 {
+		r.CPUModel = ci[0].ModelName
+	}
+	if vm, err := mem.VirtualMemory(); err == nil {
+		r.MemTotal = vm.Total
 	}
 	return r
 }
 
-func cpuModel() string {
-	f, err := os.Open("/proc/cpuinfo")
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, "model name") {
-			if i := strings.Index(line, ":"); i >= 0 {
-				return strings.TrimSpace(line[i+1:])
-			}
-		}
-	}
-	return ""
-}
-
-// cpuTimes returns (idle, total) jiffies from /proc/stat aggregate line.
-func cpuTimes() (idle, total uint64) {
-	f := readFile("/proc/stat")
-	for _, line := range strings.Split(f, "\n") {
-		if strings.HasPrefix(line, "cpu ") {
-			fields := strings.Fields(line)[1:]
-			for i, v := range fields {
-				n, _ := strconv.ParseUint(v, 10, 64)
-				total += n
-				if i == 3 || i == 4 { // idle + iowait
-					idle += n
-				}
-			}
-			return
-		}
-	}
-	return
-}
-
-func netBytes() (rx, tx uint64) {
-	f, err := os.Open("/proc/net/dev")
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		i := strings.Index(line, ":")
-		if i < 0 {
-			continue
-		}
-		iface := strings.TrimSpace(line[:i])
-		if iface == "lo" {
-			continue
-		}
-		fields := strings.Fields(line[i+1:])
-		if len(fields) < 9 {
-			continue
-		}
-		r, _ := strconv.ParseUint(fields[0], 10, 64)
-		t, _ := strconv.ParseUint(fields[8], 10, 64)
-		rx += r
-		tx += t
-	}
-	return
-}
-
-// sampleMetrics measures CPU over a short window plus mem/load/net.
+// sampleMetrics measures one resource snapshot (cross-platform via gopsutil).
 func sampleMetrics() wire.Metrics {
-	idle0, total0 := cpuTimes()
-	time.Sleep(120 * time.Millisecond)
-	idle1, total1 := cpuTimes()
-	var cpu float64
-	if total1 > total0 {
-		cpu = (1 - float64(idle1-idle0)/float64(total1-total0)) * 100
+	m := wire.Metrics{TS: time.Now().Unix()}
+	if pct, err := cpu.Percent(120*time.Millisecond, false); err == nil && len(pct) > 0 {
+		m.CPUPct = round2(pct[0])
 	}
-	memTotal := meminfoKB("MemTotal") * 1024
-	memAvail := meminfoKB("MemAvailable") * 1024
-	var memUsed uint64
-	if memTotal > memAvail {
-		memUsed = memTotal - memAvail
+	if vm, err := mem.VirtualMemory(); err == nil {
+		m.MemTotal = vm.Total
+		m.MemUsed = vm.Used
 	}
-	var load1 float64
-	if f := strings.Fields(readFile("/proc/loadavg")); len(f) > 0 {
-		load1, _ = strconv.ParseFloat(f[0], 64)
+	if la, err := load.Avg(); err == nil {
+		m.Load1 = round2(la.Load1)
 	}
-	rx, tx := netBytes()
-	return wire.Metrics{
-		TS: time.Now().Unix(), CPUPct: round2(cpu),
-		MemUsed: memUsed, MemTotal: memTotal, Load1: load1, NetRx: rx, NetTx: tx,
+	if io, err := gnet.IOCounters(false); err == nil && len(io) > 0 {
+		m.NetRx = io[0].BytesRecv
+		m.NetTx = io[0].BytesSent
 	}
+	return m
 }
 
+// procList enumerates processes (cross-platform via gopsutil).
 func procList(filter string) []wire.ProcInfo {
 	out := []wire.ProcInfo{}
-	entries, err := os.ReadDir("/proc")
+	procs, err := process.Processes()
 	if err != nil {
 		return out
 	}
-	for _, e := range entries {
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil {
+	lf := strings.ToLower(filter)
+	for _, p := range procs {
+		name, _ := p.Name()
+		if filter != "" && !strings.Contains(strings.ToLower(name), lf) {
 			continue
 		}
-		status := readFile(filepath.Join("/proc", e.Name(), "status"))
-		if status == "" {
-			continue
+		pi := wire.ProcInfo{PID: int(p.Pid), Name: name}
+		if ppid, err := p.Ppid(); err == nil {
+			pi.PPID = int(ppid)
 		}
-		p := wire.ProcInfo{PID: pid}
-		for _, line := range strings.Split(status, "\n") {
-			switch {
-			case strings.HasPrefix(line, "Name:"):
-				p.Name = strings.TrimSpace(strings.TrimPrefix(line, "Name:"))
-			case strings.HasPrefix(line, "PPid:"):
-				p.PPID, _ = strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "PPid:")))
-			case strings.HasPrefix(line, "VmRSS:"):
-				f := strings.Fields(line)
-				if len(f) >= 2 {
-					kb, _ := strconv.ParseUint(f[1], 10, 64)
-					p.RSS = kb * 1024
-				}
-			case strings.HasPrefix(line, "Uid:"):
-				f := strings.Fields(line)
-				if len(f) >= 2 {
-					p.User = uidName(f[1])
-				}
-			}
+		if u, err := p.Username(); err == nil {
+			pi.User = u
 		}
-		if filter != "" && !strings.Contains(strings.ToLower(p.Name), strings.ToLower(filter)) {
-			continue
+		if mi, err := p.MemoryInfo(); err == nil && mi != nil {
+			pi.RSS = mi.RSS
 		}
-		out = append(out, p)
+		out = append(out, pi)
 	}
 	return out
-}
-
-var uidCache = map[string]string{}
-
-func uidName(uid string) string {
-	if n, ok := uidCache[uid]; ok {
-		return n
-	}
-	name := uid
-	if u, err := user.LookupId(uid); err == nil {
-		name = u.Username
-	}
-	uidCache[uid] = name
-	return name
-}
-
-func meminfoKB(key string) uint64 {
-	f, err := os.Open("/proc/meminfo")
-	if err != nil {
-		return 0
-	}
-	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := sc.Text()
-		if strings.HasPrefix(line, key+":") {
-			fields := strings.Fields(line)
-			if len(fields) >= 2 {
-				n, _ := strconv.ParseUint(fields[1], 10, 64)
-				return n
-			}
-		}
-	}
-	return 0
 }
 
 func outboundIP() string {
@@ -214,14 +100,6 @@ func outboundIP() string {
 		}
 	}
 	return "127.0.0.1"
-}
-
-func readFile(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	return string(b)
 }
 
 func round2(f float64) float64 { return float64(int(f*100+0.5)) / 100 }

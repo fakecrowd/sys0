@@ -35,9 +35,10 @@ PIDS+=($!)
 sleep 1
 
 echo "== start agents (tcp + ws) =="
-./bin/sys0-agent -hub "127.0.0.1:${TCP_PORT}" -transport tcp -key "$KEY" -label e2e-tcp -heartbeat 5 >/tmp/sys0_e2e_a1.log 2>&1 &
+mkdir -p /tmp/sys0_e2e_d1 /tmp/sys0_e2e_d2
+./bin/sys0-agent -hub "127.0.0.1:${TCP_PORT}" -transport tcp -key "$KEY" -label e2e-tcp -heartbeat 5 -data-dir /tmp/sys0_e2e_d1 >/tmp/sys0_e2e_a1.log 2>&1 &
 PIDS+=($!)
-./bin/sys0-agent -hub "127.0.0.1:${HTTP_PORT}" -transport ws -key "$KEY" -label e2e-ws -heartbeat 5 >/tmp/sys0_e2e_a2.log 2>&1 &
+./bin/sys0-agent -hub "127.0.0.1:${HTTP_PORT}" -transport ws -key "$KEY" -label e2e-ws -heartbeat 5 -data-dir /tmp/sys0_e2e_d2 >/tmp/sys0_e2e_a2.log 2>&1 &
 PIDS+=($!)
 sleep 2
 

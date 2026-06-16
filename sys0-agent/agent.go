@@ -2,12 +2,9 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
@@ -45,8 +42,8 @@ type Agent struct {
 	quit      bool
 }
 
-// NewAgent builds an agent from config.
-func NewAgent(cfg Config, log *slog.Logger) *Agent {
+// NewAgent builds an agent from config. fingerprint is the stable per-host id.
+func NewAgent(cfg Config, fingerprint string, log *slog.Logger) *Agent {
 	hb := cfg.Heartbeat
 	if hb <= 0 {
 		hb = 15
@@ -54,17 +51,10 @@ func NewAgent(cfg Config, log *slog.Logger) *Agent {
 	return &Agent{
 		cfg: cfg, log: log,
 		label: cfg.Label, heartbeat: hb,
-		fingerprint: fingerprint(cfg.Label),
+		fingerprint: fingerprint,
 		shells:      newShellManager(),
 		reconnect:   make(chan struct{}, 1),
 	}
-}
-
-// fingerprint derives a stable node identity from hostname + label.
-func fingerprint(label string) string {
-	host, _ := os.Hostname()
-	sum := sha256.Sum256([]byte(host + "|" + label))
-	return hex.EncodeToString(sum[:])[:16]
 }
 
 // Run connects with exponential backoff until ctx is cancelled or shutdown.

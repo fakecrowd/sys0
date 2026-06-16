@@ -7,18 +7,20 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"runtime"
 	"sync"
 
-	"github.com/creack/pty"
+	"github.com/aymanbagabas/go-pty"
 	"github.com/fakecrowd/sys0/internal/rpc"
 	"github.com/fakecrowd/sys0/internal/wire"
 )
 
-// shellSession is one interactive PTY-backed shell on the agent.
+// shellSession is one interactive PTY-backed shell on the agent (cross-platform
+// via go-pty: Unix pty / Windows ConPTY).
 type shellSession struct {
-	id   string
-	cmd  *exec.Cmd
-	ptmx *os.File
+	id  string
+	pty pty.Pty
+	cmd *pty.Cmd
 }
 
 type shellManager struct {
@@ -48,15 +50,19 @@ func (a *Agent) doShellOpen(params json.RawMessage) (any, *rpc.Error) {
 		rows = 24
 	}
 
-	cmd := exec.Command(shell, "-i")
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
+	ptmx, err := pty.New()
 	if err != nil {
 		return nil, rpc.Errorf(rpc.CodeInternal, "open pty: %v", err)
 	}
+	cmd := ptmx.Command(shell)
+	if err := cmd.Start(); err != nil {
+		ptmx.Close()
+		return nil, rpc.Errorf(rpc.CodeInternal, "start shell: %v", err)
+	}
+	_ = ptmx.Resize(cols, rows)
 
 	id := "s" + randID()
-	sess := &shellSession{id: id, cmd: cmd, ptmx: ptmx}
+	sess := &shellSession{id: id, pty: ptmx, cmd: cmd}
 	a.shells.mu.Lock()
 	a.shells.sessions[id] = sess
 	a.shells.mu.Unlock()
@@ -65,7 +71,6 @@ func (a *Agent) doShellOpen(params json.RawMessage) (any, *rpc.Error) {
 	peer := a.peer
 	a.mu.Unlock()
 
-	// stream output -> emit (chan "shell")
 	go func() {
 		buf := make([]byte, 8192)
 		seq := 0
@@ -106,7 +111,7 @@ func (a *Agent) doShellInput(params json.RawMessage) (any, *rpc.Error) {
 	if err != nil {
 		return nil, rpc.Errorf(rpc.CodeBadParams, "bad base64")
 	}
-	if _, err := sess.ptmx.Write(raw); err != nil {
+	if _, err := sess.pty.Write(raw); err != nil {
 		return nil, rpc.Errorf(rpc.CodeInternal, "%v", err)
 	}
 	return wire.OKResult{OK: true}, nil
@@ -123,7 +128,7 @@ func (a *Agent) doShellResize(params json.RawMessage) (any, *rpc.Error) {
 	if sess == nil {
 		return nil, rpc.Errorf(rpc.CodeBadParams, "no such session")
 	}
-	pty.Setsize(sess.ptmx, &pty.Winsize{Cols: uint16(p.Cols), Rows: uint16(p.Rows)})
+	_ = sess.pty.Resize(p.Cols, p.Rows)
 	return wire.OKResult{OK: true}, nil
 }
 
@@ -147,12 +152,10 @@ func (a *Agent) closeShell(id string, peer *rpc.Peer) {
 	if sess == nil {
 		return
 	}
-	sess.ptmx.Close()
-	if sess.cmd.Process != nil {
-		sess.cmd.Process.Kill()
+	sess.pty.Close()
+	if sess.cmd != nil {
+		sess.cmd.Wait()
 	}
-	sess.cmd.Wait()
-	// notify the hub that the session ended
 	if peer != nil {
 		data, _ := json.Marshal(map[string]any{"session": id, "closed": true})
 		peer.Notify(wire.MethodEmit, wire.EmitParams{Chan: "shell", Data: data})
@@ -160,6 +163,12 @@ func (a *Agent) closeShell(id string, peer *rpc.Peer) {
 }
 
 func pickShell() string {
+	if runtime.GOOS == "windows" {
+		if p, err := exec.LookPath("powershell.exe"); err == nil {
+			return p
+		}
+		return "cmd.exe"
+	}
 	for _, sh := range []string{"/bin/bash", "/bin/sh"} {
 		if _, err := os.Stat(sh); err == nil {
 			return sh
