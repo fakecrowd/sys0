@@ -37,6 +37,7 @@ type Agent struct {
 	peer        *rpc.Peer
 	watchStop   chan struct{}
 	shells      *shellManager
+	tasks       *taskManager
 
 	reconnect chan struct{}
 	quit      bool
@@ -53,6 +54,7 @@ func NewAgent(cfg Config, fingerprint string, log *slog.Logger) *Agent {
 		label: cfg.Label, heartbeat: hb,
 		fingerprint: fingerprint,
 		shells:      newShellManager(),
+		tasks:       newTaskManager(),
 		reconnect:   make(chan struct{}, 1),
 	}
 }
@@ -172,6 +174,16 @@ func (a *Agent) handle(ctx context.Context, method string, params json.RawMessag
 		return a.doShellResize(params)
 	case wire.MethodShellClose:
 		return a.doShellClose(params)
+	case wire.MethodTaskStart:
+		return a.doTaskStart(params)
+	case wire.MethodTaskInput:
+		return a.doTaskInput(params)
+	case wire.MethodTaskSignal:
+		return a.doTaskSignal(params)
+	case wire.MethodTaskList:
+		return a.doTaskList(params)
+	case wire.MethodTaskRemove:
+		return a.doTaskRemove(params)
 	case wire.MethodHostInfo:
 		return hostInfo(), nil
 	case wire.MethodHostMetrics:

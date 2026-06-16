@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { api, getToken, getRole, setSession, clearSession, eventStream, type Node } from "./api";
 import { Terminal } from "./components/Terminal";
 import { Shell } from "./components/Shell";
+import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
 import { Files } from "./components/Files";
 import { Monitor } from "./components/Monitor";
@@ -57,7 +58,7 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
 }
 
 const TABS = [
-  ["terminal", "终端"], ["shell", "Shell"], ["proc", "进程"], ["files", "文件"],
+  ["terminal", "终端"], ["shell", "Shell"], ["tasks", "任务"], ["proc", "进程"], ["files", "文件"],
   ["monitor", "监控"], ["actions", "动作"], ["audit", "审计"], ["keys", "密钥"],
 ] as const;
 type Tab = (typeof TABS)[number][0];
@@ -117,6 +118,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <div className="flex-1 p-3 min-h-0 overflow-auto">
             {tab === "terminal" && <Terminal targets={targets} allCount={nodes.length} />}
             {tab === "shell" && <Shell nodes={nodes} primary={primary} />}
+            {tab === "tasks" && <Tasks nodes={nodes} primary={primary} />}
             {tab === "proc" && <Processes nodes={nodes} primary={primary} />}
             {tab === "files" && <Files nodes={nodes} primary={primary} />}
             {tab === "monitor" && <Monitor targets={targets} live={live} />}

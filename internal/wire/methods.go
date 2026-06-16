@@ -122,6 +122,31 @@ var NodeMethods = []MethodSpec{
 		Description:  "令被控端进程退出。",
 		ParamsSchema: obj(map[string]any{}),
 	},
+	{
+		Name: MethodTaskStart, Scope: "node", Dangerous: true, Interactive: true,
+		Description:  "拉起一个长期托管子进程（可选 PTY），输出经 emit 实时推送。",
+		ParamsSchema: obj(map[string]any{"name": str(), "cmd": str(), "cwd": str(), "pty": boolt()}, "cmd"),
+	},
+	{
+		Name: MethodTaskInput, Scope: "node", Dangerous: true, Interactive: true,
+		Description:  "向托管子进程写入 stdin（base64）。",
+		ParamsSchema: obj(map[string]any{"task": str(), "data": str()}, "task", "data"),
+	},
+	{
+		Name: MethodTaskSignal, Scope: "node", Dangerous: true,
+		Description:  "停止托管子进程（TERM/KILL）。",
+		ParamsSchema: obj(map[string]any{"task": str(), "sig": str()}, "task"),
+	},
+	{
+		Name: MethodTaskList, Scope: "node",
+		Description:  "列出本节点的托管子进程及其状态。",
+		ParamsSchema: obj(map[string]any{}),
+	},
+	{
+		Name: MethodTaskRemove, Scope: "node",
+		Description:  "移除一个托管子进程记录（运行中会先停止）。",
+		ParamsSchema: obj(map[string]any{"task": str()}, "task"),
+	},
 }
 
 // MethodIndex maps method name to spec.

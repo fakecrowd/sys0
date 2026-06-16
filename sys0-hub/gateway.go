@@ -118,6 +118,13 @@ func (n *nodeSession) handleNotify(method string, params json.RawMessage) {
 				n.hub.reg.broadcast("shell", "event.shell", d)
 			}
 		}
+		if e.Chan == "task" {
+			var d map[string]any
+			if json.Unmarshal(e.Data, &d) == nil {
+				d["node"] = id
+				n.hub.reg.broadcast("task", "event.task", d)
+			}
+		}
 	}
 }
 

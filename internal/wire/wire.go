@@ -30,6 +30,13 @@ const (
 	MethodFsGet       = "fs.get"
 	MethodFsPut       = "fs.put"
 	MethodFsRm        = "fs.rm"
+
+	// managed processes (long-running supervised child processes)
+	MethodTaskStart  = "task.start"
+	MethodTaskInput  = "task.input"
+	MethodTaskSignal = "task.signal"
+	MethodTaskList   = "task.list"
+	MethodTaskRemove = "task.remove"
 )
 
 // ---- handshake ----
@@ -95,6 +102,47 @@ type ShellResizeParams struct {
 
 type ShellCloseParams struct {
 	Session string `json:"session"`
+}
+
+// ---- managed processes ----
+
+type TaskStartParams struct {
+	Name string `json:"name,omitempty"`
+	Cmd  string `json:"cmd"`
+	Cwd  string `json:"cwd,omitempty"`
+	PTY  bool   `json:"pty,omitempty"` // allocate a PTY for full interactivity
+}
+
+type TaskStartResult struct {
+	Task string `json:"task"`
+}
+
+type TaskInputParams struct {
+	Task string `json:"task"`
+	Data string `json:"data"` // base64 to stdin
+}
+
+type TaskSignalParams struct {
+	Task string `json:"task"`
+	Sig  string `json:"sig"` // TERM | KILL
+}
+
+type TaskRemoveParams struct {
+	Task string `json:"task"`
+}
+
+type TaskInfo struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Cmd     string `json:"cmd"`
+	State   string `json:"state"` // running | exited
+	PID     int    `json:"pid"`
+	Exit    int    `json:"exit"`
+	Started int64  `json:"started"`
+}
+
+type TaskListResult struct {
+	Tasks []TaskInfo `json:"tasks"`
 }
 
 // ---- host ----

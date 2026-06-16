@@ -102,12 +102,24 @@ echo "== console served =="
 HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' "$B/")
 [ "$HTTP_CODE" = "200" ] || fail "console root = $HTTP_CODE"
 
+echo "== managed task: start + list + signal =="
+TASK=$(curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
+  -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"task.start\",\"params\":{\"name\":\"e2e-task\",\"cmd\":\"sleep 30\"}}}" \
+  | jq_py 'd["items"][0]["value"]["task"]')
+[ -n "$TASK" ] || fail "task.start returned no id"
+RUNNING=$(curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
+  -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"task.list\"}}" \
+  | jq_py 'sum(1 for t in d["items"][0]["value"]["tasks"] if t["state"]=="running")')
+[ "$RUNNING" -ge 1 ] || fail "task not running ($RUNNING)"
+curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
+  -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"task.signal\",\"params\":{\"task\":\"$TASK\",\"sig\":\"KILL\"}}}" >/dev/null
+
 echo "== node.shutdown -> offline =="
 curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
   -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"node.shutdown\"}}" >/dev/null
 sleep 1
-N2=$(curl -s -H "$AUTH" "$B/api/v1/nodes" | jq_py 'len(d["nodes"])')
-[ "$N2" = "1" ] || fail "expected 1 node after shutdown, got $N2"
+ONLINE=$(curl -s -H "$AUTH" "$B/api/v1/nodes" | jq_py 'sum(1 for n in d["nodes"] if n["state"]=="online")')
+[ "$ONLINE" = "1" ] || fail "expected 1 online node after shutdown, got $ONLINE"
 
 echo ""
 echo "ALL E2E CHECKS PASSED ✓"
