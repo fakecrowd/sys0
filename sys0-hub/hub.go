@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -74,13 +75,15 @@ func NewHub(cfg HubConfig, log *slog.Logger) (*Hub, error) {
 	return &Hub{cfg: cfg, log: log, store: store, reg: NewRegistry()}, nil
 }
 
-// ListNodes returns a snapshot of online nodes.
+// ListNodes returns a snapshot of online nodes in a stable order (by id) so the
+// console isn't reshuffled on every refresh.
 func (h *Hub) ListNodes() []NodeView {
 	sessions := h.reg.listNodes()
 	out := make([]NodeView, 0, len(sessions))
 	for _, s := range sessions {
 		out = append(out, s.view())
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 

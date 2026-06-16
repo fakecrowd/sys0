@@ -8,11 +8,17 @@ import { Monitor } from "./components/Monitor";
 import { Actions } from "./components/Actions";
 import { Audit } from "./components/Audit";
 import { Keys } from "./components/Keys";
+import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
 
 export function App() {
   const [authed, setAuthed] = useState(!!getToken());
-  if (!authed) return <Login onAuthed={() => setAuthed(true)} />;
-  return <Console onLogout={() => { clearSession(); setAuthed(false); }} />;
+  return (
+    <>
+      {!authed ? <Login onAuthed={() => setAuthed(true)} />
+        : <Console onLogout={() => { clearSession(); setAuthed(false); }} />}
+      <Dialogs />
+    </>
+  );
 }
 
 function Login({ onAuthed }: { onAuthed: () => void }) {
@@ -124,21 +130,68 @@ function Console({ onLogout }: { onLogout: () => void }) {
   );
 }
 
+const SORT_KEY = "sys0_nodesort";
+type SortField = "label" | "id" | "cpu" | "mem" | "lastSeen";
+const SORT_FIELDS: [SortField, string][] = [
+  ["label", "名称"], ["id", "ID"], ["cpu", "CPU"], ["mem", "内存"], ["lastSeen", "上线时间"],
+];
+
+function loadSort(): { field: SortField; dir: 1 | -1 } {
+  try { return JSON.parse(localStorage.getItem(SORT_KEY) || "") || { field: "label", dir: 1 }; }
+  catch { return { field: "label", dir: 1 }; }
+}
+
+function sortNodes(nodes: Node[], live: Record<string, any>, field: SortField, dir: 1 | -1): Node[] {
+  const val = (n: Node): string | number => {
+    switch (field) {
+      case "label": return n.label.toLowerCase();
+      case "id": return n.id;
+      case "cpu": return live[n.id]?.cpuPct ?? -1;
+      case "mem": { const m = live[n.id]; return m ? m.memUsed / m.memTotal : -1; }
+      case "lastSeen": return n.lastSeen;
+    }
+  };
+  return [...nodes].sort((a, b) => {
+    const va = val(a), vb = val(b);
+    if (va < vb) return -1 * dir;
+    if (va > vb) return 1 * dir;
+    return a.id < b.id ? -1 : 1; // stable tiebreak by id
+  });
+}
+
 function NodeList({
   nodes, selected, toggle, live, onRefresh,
 }: {
   nodes: Node[]; selected: Set<string>; toggle: (id: string) => void;
   live: Record<string, any>; onRefresh: () => void;
 }) {
+  const [sort, setSort] = useState(loadSort);
+  const update = (s: { field: SortField; dir: 1 | -1 }) => {
+    setSort(s);
+    localStorage.setItem(SORT_KEY, JSON.stringify(s));
+  };
+  const ordered = sortNodes(nodes, live, sort.field, sort.dir);
+
   return (
     <aside className="w-[300px] flex flex-col" style={{ borderRight: "1px solid var(--border)" }}>
       <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
         <span className="mono-sm">NODES · 工作集</span>
         <button className="btn" onClick={onRefresh}>↻</button>
       </div>
+      <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
+        <span className="mono-sm">排序</span>
+        <select className="input" style={{ flex: 1, padding: "3px 6px" }} value={sort.field}
+          onChange={(e) => update({ ...sort, field: e.target.value as SortField })}>
+          {SORT_FIELDS.map(([f, label]) => <option key={f} value={f}>{label}</option>)}
+        </select>
+        <button className="btn" style={{ padding: "3px 9px" }} title="切换升降序"
+          onClick={() => update({ ...sort, dir: (sort.dir * -1) as 1 | -1 })}>
+          {sort.dir === 1 ? "↑" : "↓"}
+        </button>
+      </div>
       <div className="flex-1 overflow-auto p-2 space-y-2">
-        {nodes.length === 0 && <div className="mono-sm px-2 py-4">无在线节点</div>}
-        {nodes.map((n) => (
+        {ordered.length === 0 && <div className="mono-sm px-2 py-4">无在线节点</div>}
+        {ordered.map((n) => (
           <NodeCard key={n.id} n={n} on={selected.has(n.id)} toggle={toggle} m={live[n.id]} onChanged={onRefresh} />
         ))}
       </div>
@@ -152,12 +205,12 @@ function NodeCard({
   const [open, setOpen] = useState(false);
   const [info, setInfo] = useState<any>(null);
 
-  const act = async (label: string, fn: () => Promise<any>) => {
-    if (!confirm(`${label} @ ${n.label}?`)) return;
-    try { await fn(); onChanged(); } catch (e) { alert(String(e)); }
+  const act = async (label: string, danger: boolean, fn: () => Promise<any>) => {
+    if (!(await confirmDialog(`${label} @ ${n.label}（${n.id}）?`, { title: label, danger }))) return;
+    try { await fn(); onChanged(); } catch (e) { alertDialog(String(e), { title: "操作失败" }); }
   };
   const rename = async () => {
-    const v = prompt("新别名", n.label);
+    const v = await promptDialog("重命名节点", n.label, "新别名");
     if (v) { await api.setLabel(n.id, v, n.tags || []); onChanged(); }
   };
   const showInfo = async () => {
@@ -182,11 +235,11 @@ function NodeCard({
         <button className="btn" style={{ padding: "2px 7px" }} onClick={showInfo}>ⓘ</button>
         <button className="btn" style={{ padding: "2px 7px" }} onClick={rename}>✎</button>
         <button className="btn" style={{ padding: "2px 7px" }}
-          onClick={() => act("重连", () => api.one(n.id, "node.reconnect"))}>⟳</button>
+          onClick={() => act("重连", false, () => api.one(n.id, "node.reconnect"))}>⟳</button>
         <button className="btn" style={{ padding: "2px 7px", color: "var(--warn)" }}
-          onClick={() => act("关闭被控端", () => api.one(n.id, "node.shutdown"))}>⏻</button>
+          onClick={() => act("关闭被控端", true, () => api.one(n.id, "node.shutdown"))}>⏻</button>
         <button className="btn" style={{ padding: "2px 7px", color: "var(--danger)" }}
-          onClick={() => act("断开", () => api.detach(n.id))}>✕</button>
+          onClick={() => act("断开", true, () => api.detach(n.id))}>✕</button>
       </div>
       {open && info && (
         <pre className="mono-sm mt-2" style={{ margin: 0, whiteSpace: "pre-wrap", color: "var(--muted)" }}>

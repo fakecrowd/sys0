@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import { confirmDialog, alertDialog } from "./dialogs";
 
 // API Key management (admin) — create machine credentials for HTTP API / MCP.
 export function Keys() {
@@ -14,10 +15,10 @@ export function Keys() {
   const create = async () => {
     const r = await api.keyCreate({ name, role: "operator", allowDangerous: dangerous });
     if (r.ok && r.key) { setCreated(r.key); load(); }
-    else alert(r.error || "failed");
+    else alertDialog(r.error || "failed", { title: "创建失败" });
   };
   const revoke = async (id: string) => {
-    if (!confirm("吊销 " + id + "?")) return;
+    if (!(await confirmDialog("吊销 " + id + "?", { title: "吊销 API Key", danger: true }))) return;
     await api.keyRevoke(id); load();
   };
 

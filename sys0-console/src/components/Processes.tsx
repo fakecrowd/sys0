@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, type Node } from "../api";
+import { confirmDialog, alertDialog } from "./dialogs";
 
 export function Processes({ nodes, primary }: { nodes: Node[]; primary: string }) {
   const [node, setNode] = useState(primary);
@@ -20,9 +21,9 @@ export function Processes({ nodes, primary }: { nodes: Node[]; primary: string }
   };
 
   const kill = async (pid: number, name: string, sig: string) => {
-    if (!confirm(`${sig} ${name} (pid ${pid}) @ ${node}?`)) return;
+    if (!(await confirmDialog(`${sig} ${name}（pid ${pid}）@ ${node}?`, { title: "结束进程", danger: sig === "KILL" }))) return;
     try { await api.one(node, "proc.signal", { pid, sig }); setTimeout(load, 300); }
-    catch (e) { alert(String(e)); }
+    catch (e) { alertDialog(String(e), { title: "操作失败" }); }
   };
 
   return (

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, b64encode, b64decode, type Node } from "../api";
+import { confirmDialog, alertDialog } from "./dialogs";
 
 export function Files({ nodes, primary }: { nodes: Node[]; primary: string }) {
   const [node, setNode] = useState(primary);
@@ -30,19 +31,19 @@ export function Files({ nodes, primary }: { nodes: Node[]; primary: string }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = name; a.click();
       URL.revokeObjectURL(url);
-    } catch (e) { alert(String(e)); }
+    } catch (e) { alertDialog(String(e), { title: "下载失败" }); }
   };
 
   const remove = async (name: string, isDir: boolean) => {
-    if (!confirm(`删除 ${join(path, name)} @ ${node}?`)) return;
+    if (!(await confirmDialog(`删除 ${join(path, name)} @ ${node}?`, { title: "删除文件", danger: true }))) return;
     try { await api.one(node, "fs.rm", { path: join(path, name), recursive: isDir }); ls(path); }
-    catch (e) { alert(String(e)); }
+    catch (e) { alertDialog(String(e), { title: "删除失败" }); }
   };
 
   const upload = async (file: File) => {
     const buf = new Uint8Array(await file.arrayBuffer());
     try { await api.one(node, "fs.put", { path: join(path, file.name), data: b64encode(buf) }); ls(path); }
-    catch (e) { alert(String(e)); }
+    catch (e) { alertDialog(String(e), { title: "上传失败" }); }
   };
 
   useEffect(() => { if (node) ls("/"); }, [node]);
