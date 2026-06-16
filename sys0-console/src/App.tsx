@@ -152,6 +152,9 @@ function sortNodes(nodes: Node[], live: Record<string, any>, field: SortField, d
     }
   };
   return [...nodes].sort((a, b) => {
+    // online nodes always group before offline
+    const oa = a.state === "online" ? 0 : 1, ob = b.state === "online" ? 0 : 1;
+    if (oa !== ob) return oa - ob;
     const va = val(a), vb = val(b);
     if (va < vb) return -1 * dir;
     if (va > vb) return 1 * dir;
@@ -217,29 +220,48 @@ function NodeCard({
     setOpen((o) => !o);
     if (!info) { try { setInfo(await api.one(n.id, "host.info")); } catch (e) { setInfo({ err: String(e) }); } }
   };
+  const forget = async () => {
+    if (!(await confirmDialog(`从记录中删除离线节点 ${n.label}（${n.id}）?`, { title: "忘记节点", danger: true }))) return;
+    const r = await api.deleteNode(n.id);
+    if (!r.ok) await alertDialog(r.error || "失败", { title: "删除失败" });
+    onChanged();
+  };
+
+  const offline = n.state === "offline";
 
   return (
-    <div className="panel p-2.5" style={on ? { borderColor: "var(--accent)" } : {}}>
-      <div className="flex items-center gap-2 cursor-pointer" onClick={() => toggle(n.id)}>
-        <span className="dot" style={{ background: "var(--accent)" }} />
+    <div className="panel p-2.5" style={{ ...(on ? { borderColor: "var(--accent)" } : {}), ...(offline ? { opacity: 0.55 } : {}) }}>
+      <div className={offline ? "flex items-center gap-2" : "flex items-center gap-2 cursor-pointer"}
+        onClick={() => !offline && toggle(n.id)}>
+        <span className="dot" style={{ background: offline ? "var(--muted)" : "var(--accent)" }} />
         <span style={{ color: on ? "var(--accent)" : "var(--fg)" }}>{n.label}</span>
+        {offline && <span className="tag" style={{ color: "var(--muted)" }}>offline</span>}
         <span className="mono-sm ml-auto">{n.id}</span>
       </div>
-      <div className="mono-sm mt-1.5">{n.host.os}/{n.host.arch} · {n.host.ip}</div>
-      {m && (
+      <div className="mono-sm mt-1.5">{n.host.os}/{n.host.arch} · {n.host.ip || "—"}</div>
+      {m && !offline && (
         <div className="mono-sm mt-1">
           cpu {m.cpuPct?.toFixed?.(1)}% · mem {((m.memUsed / m.memTotal) * 100).toFixed(0)}% · load {m.load1}
         </div>
       )}
+      {offline && n.lastSeen > 0 && (
+        <div className="mono-sm mt-1">上次在线 {new Date(n.lastSeen * 1000).toLocaleString()}</div>
+      )}
       <div className="flex flex-wrap gap-1 mt-2">
-        <button className="btn" style={{ padding: "2px 7px" }} onClick={showInfo}>ⓘ</button>
-        <button className="btn" style={{ padding: "2px 7px" }} onClick={rename}>✎</button>
-        <button className="btn" style={{ padding: "2px 7px" }}
-          onClick={() => act("重连", false, () => api.one(n.id, "node.reconnect"))}>⟳</button>
-        <button className="btn" style={{ padding: "2px 7px", color: "var(--warn)" }}
-          onClick={() => act("关闭被控端", true, () => api.one(n.id, "node.shutdown"))}>⏻</button>
-        <button className="btn" style={{ padding: "2px 7px", color: "var(--danger)" }}
-          onClick={() => act("断开", true, () => api.detach(n.id))}>✕</button>
+        {!offline ? (
+          <>
+            <button className="btn" style={{ padding: "2px 7px" }} onClick={showInfo}>ⓘ</button>
+            <button className="btn" style={{ padding: "2px 7px" }} onClick={rename}>✎</button>
+            <button className="btn" style={{ padding: "2px 7px" }}
+              onClick={() => act("重连", false, () => api.one(n.id, "node.reconnect"))}>⟳</button>
+            <button className="btn" style={{ padding: "2px 7px", color: "var(--warn)" }}
+              onClick={() => act("关闭被控端", true, () => api.one(n.id, "node.shutdown"))}>⏻</button>
+            <button className="btn" style={{ padding: "2px 7px", color: "var(--danger)" }}
+              onClick={() => act("断开", true, () => api.detach(n.id))}>✕</button>
+          </>
+        ) : (
+          <button className="btn" style={{ padding: "2px 7px", color: "var(--danger)" }} onClick={forget}>忘记</button>
+        )}
       </div>
       {open && info && (
         <pre className="mono-sm mt-2" style={{ margin: 0, whiteSpace: "pre-wrap", color: "var(--muted)" }}>

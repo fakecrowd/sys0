@@ -75,13 +75,26 @@ func NewHub(cfg HubConfig, log *slog.Logger) (*Hub, error) {
 	return &Hub{cfg: cfg, log: log, store: store, reg: NewRegistry()}, nil
 }
 
-// ListNodes returns a snapshot of online nodes in a stable order (by id) so the
-// console isn't reshuffled on every refresh.
+// ListNodes returns the full known fleet: online nodes (live, from the
+// registry) merged with persisted offline nodes (from the store), stably
+// ordered by id.
 func (h *Hub) ListNodes() []NodeView {
-	sessions := h.reg.listNodes()
-	out := make([]NodeView, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, s.view())
+	records, _ := h.store.ListNodeRecords()
+	out := make([]NodeView, 0, len(records))
+	seen := map[string]bool{}
+	for _, r := range records {
+		seen[r.ID] = true
+		if s := h.reg.get(r.ID); s != nil {
+			out = append(out, s.view())
+		} else {
+			out = append(out, nodeViewFromRecord(r))
+		}
+	}
+	// include any online node not yet persisted (shouldn't happen, but be safe)
+	for _, s := range h.reg.listNodes() {
+		if !seen[s.nodeID] {
+			out = append(out, s.view())
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,6 +47,19 @@ func (n *nodeSession) view() NodeView {
 	return NodeView{
 		ID: n.nodeID, Label: n.label, Tags: tags, Host: n.host,
 		Version: n.version, State: "online", LastSeen: n.lastSeen.Unix(),
+	}
+}
+
+// nodeViewFromRecord builds an offline NodeView from a persisted record.
+func nodeViewFromRecord(r Node) NodeView {
+	tags := []string{}
+	if r.Tags != "" {
+		tags = strings.Split(r.Tags, ",")
+	}
+	return NodeView{
+		ID: r.ID, Label: r.Label, Tags: tags,
+		Host:    wire.HostSummary{Name: r.Label, OS: r.OS, Arch: r.Arch, Kernel: r.Kernel, IP: r.IP},
+		Version: r.AgentVersion, State: "offline", LastSeen: r.LastSeen,
 	}
 }
 
