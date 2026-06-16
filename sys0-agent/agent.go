@@ -178,10 +178,16 @@ func (a *Agent) handle(ctx context.Context, method string, params json.RawMessag
 		return a.doTaskStart(params)
 	case wire.MethodTaskInput:
 		return a.doTaskInput(params)
+	case wire.MethodTaskResize:
+		return a.doTaskResize(params)
 	case wire.MethodTaskSignal:
 		return a.doTaskSignal(params)
 	case wire.MethodTaskList:
 		return a.doTaskList(params)
+	case wire.MethodTaskOutput:
+		return a.doTaskOutput(params)
+	case wire.MethodTaskRestart:
+		return a.doTaskRestart(params)
 	case wire.MethodTaskRemove:
 		return a.doTaskRemove(params)
 	case wire.MethodHostInfo:

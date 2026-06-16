@@ -32,11 +32,14 @@ const (
 	MethodFsRm        = "fs.rm"
 
 	// managed processes (long-running supervised child processes)
-	MethodTaskStart  = "task.start"
-	MethodTaskInput  = "task.input"
-	MethodTaskSignal = "task.signal"
-	MethodTaskList   = "task.list"
-	MethodTaskRemove = "task.remove"
+	MethodTaskStart   = "task.start"
+	MethodTaskInput   = "task.input"
+	MethodTaskResize  = "task.resize"
+	MethodTaskSignal  = "task.signal"
+	MethodTaskList    = "task.list"
+	MethodTaskOutput  = "task.output"
+	MethodTaskRestart = "task.restart"
+	MethodTaskRemove  = "task.remove"
 )
 
 // ---- handshake ----
@@ -110,7 +113,8 @@ type TaskStartParams struct {
 	Name string `json:"name,omitempty"`
 	Cmd  string `json:"cmd"`
 	Cwd  string `json:"cwd,omitempty"`
-	PTY  bool   `json:"pty,omitempty"` // allocate a PTY for full interactivity
+	Cols int    `json:"cols,omitempty"`
+	Rows int    `json:"rows,omitempty"`
 }
 
 type TaskStartResult struct {
@@ -122,23 +126,38 @@ type TaskInputParams struct {
 	Data string `json:"data"` // base64 to stdin
 }
 
+type TaskResizeParams struct {
+	Task string `json:"task"`
+	Cols int    `json:"cols"`
+	Rows int    `json:"rows"`
+}
+
 type TaskSignalParams struct {
 	Task string `json:"task"`
 	Sig  string `json:"sig"` // TERM | KILL
 }
 
-type TaskRemoveParams struct {
+type TaskRefParams struct {
 	Task string `json:"task"`
 }
 
+// TaskOutputResult returns the buffered terminal output (history) of a task.
+type TaskOutputResult struct {
+	Task  string `json:"task"`
+	Data  string `json:"data"` // base64 of recent output buffer
+	State string `json:"state"`
+	Exit  int    `json:"exit"`
+}
+
 type TaskInfo struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Cmd     string `json:"cmd"`
-	State   string `json:"state"` // running | exited
-	PID     int    `json:"pid"`
-	Exit    int    `json:"exit"`
-	Started int64  `json:"started"`
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Cmd      string `json:"cmd"`
+	State    string `json:"state"` // running | exited
+	PID      int    `json:"pid"`
+	Exit     int    `json:"exit"`
+	Started  int64  `json:"started"`
+	Finished int64  `json:"finished"`
 }
 
 type TaskListResult struct {

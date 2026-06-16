@@ -124,13 +124,18 @@ var NodeMethods = []MethodSpec{
 	},
 	{
 		Name: MethodTaskStart, Scope: "node", Dangerous: true, Interactive: true,
-		Description:  "拉起一个长期托管子进程（可选 PTY），输出经 emit 实时推送。",
-		ParamsSchema: obj(map[string]any{"name": str(), "cmd": str(), "cwd": str(), "pty": boolt()}, "cmd"),
+		Description:  "拉起一个长期托管子进程（PTY，ANSI 输出 + 可交互），输出经 emit 实时推送。",
+		ParamsSchema: obj(map[string]any{"name": str(), "cmd": str(), "cwd": str(), "cols": intg(), "rows": intg()}, "cmd"),
 	},
 	{
 		Name: MethodTaskInput, Scope: "node", Dangerous: true, Interactive: true,
 		Description:  "向托管子进程写入 stdin（base64）。",
 		ParamsSchema: obj(map[string]any{"task": str(), "data": str()}, "task", "data"),
+	},
+	{
+		Name: MethodTaskResize, Scope: "node", Interactive: true,
+		Description:  "调整托管子进程的 PTY 尺寸。",
+		ParamsSchema: obj(map[string]any{"task": str(), "cols": intg(), "rows": intg()}, "task"),
 	},
 	{
 		Name: MethodTaskSignal, Scope: "node", Dangerous: true,
@@ -139,8 +144,18 @@ var NodeMethods = []MethodSpec{
 	},
 	{
 		Name: MethodTaskList, Scope: "node",
-		Description:  "列出本节点的托管子进程及其状态。",
+		Description:  "列出本节点的托管子进程（含运行中与已退出的历史）。",
 		ParamsSchema: obj(map[string]any{}),
+	},
+	{
+		Name: MethodTaskOutput, Scope: "node",
+		Description:  "获取托管子进程的历史输出缓冲（base64）。",
+		ParamsSchema: obj(map[string]any{"task": str()}, "task"),
+	},
+	{
+		Name: MethodTaskRestart, Scope: "node", Dangerous: true,
+		Description:  "用相同命令重启托管子进程。",
+		ParamsSchema: obj(map[string]any{"task": str()}, "task"),
 	},
 	{
 		Name: MethodTaskRemove, Scope: "node",
