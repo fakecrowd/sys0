@@ -1,0 +1,67 @@
+name: Release
+
+# When a GitHub Release is published, build executables for every supported
+# OS/arch and attach the archives to the release.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rebuild the console so the hub embeds the latest UI.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run build
+        working-directory: sys0-console
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build & package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -e
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          dist="sys0_${TAG}_${GOOS}_${GOARCH}"
+          mkdir -p "$dist"
+          go build -trimpath -ldflags "-s -w" -o "$dist/sys0-hub$ext" ./sys0-hub
+          go build -trimpath -ldflags "-s -w" -o "$dist/sys0-agent$ext" ./sys0-agent
+          cp README.md "$dist/" 2>/dev/null || true
+          if [ "$GOOS" = "windows" ]; then
+            zip -r "$dist.zip" "$dist"
+            echo "ASSET=$dist.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$dist.tar.gz" "$dist"
+            echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" "$ASSET" --clobber
