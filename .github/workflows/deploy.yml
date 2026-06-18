@@ -1,7 +1,14 @@
 name: Deploy (prod)
 
-# Push to deploy/prod -> build the single hub image, push to GHCR,
-# then ping the Portainer stack webhook on jp09 to repull & redeploy.
+# Push to deploy/prod -> build the single hub image, push to GHCR, then
+# pull+recreate the sys0 container on jp09 via the Portainer-proxied Docker API.
+#
+# NOTE: sys0 is a NON-git (raw compose) Portainer stack, so the old stack
+# webhook never repulls a new image when only the code (not the compose)
+# changes — it returned HTTP 404 because no webhook is configured on the stack
+# at all. The reliable path for "code changed, compose unchanged" is to pull
+# :latest and recreate the container directly. See skill sys0-agent-hub-dev /
+# references/portainer-api-workflow.md.
 on:
   push:
     branches: [deploy/prod]
@@ -55,14 +62,17 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Portainer redeploy (jp09 stack webhook)
+      - uses: actions/checkout@v4
+
+      - name: Pull + recreate sys0 container on jp09 (Portainer Docker API)
         env:
-          HOOK: ${{ secrets.PORTAINER_WEBHOOK }}
+          PORTAINER_URL: https://portainer.rockchin.top
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          ENDPOINT: "22"
+          CONTAINER: sys0
         run: |
-          if [ -z "$HOOK" ]; then
-            echo "::error::PORTAINER_WEBHOOK secret not set — image pushed but redeploy skipped."
+          if [ -z "$PORTAINER_API_KEY" ]; then
+            echo "::error::PORTAINER_API_KEY secret not set — image pushed but redeploy skipped."
             exit 1
           fi
-          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HOOK")
-          echo "Portainer webhook responded HTTP $code"
-          case "$code" in 2*|204) echo "redeploy triggered ok";; *) echo "::error::webhook HTTP $code"; exit 1;; esac
+          python3 .github/scripts/portainer_redeploy.py
