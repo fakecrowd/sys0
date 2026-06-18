@@ -65,28 +65,19 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger Portainer GitOps redeploy (webhook, force-pull image)
+      - uses: actions/checkout@v4
+
+      - name: Deploy to jp09 via Portainer GitOps (explicit pull + git redeploy)
         env:
-          PORTAINER_WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK }}
+          PORTAINER_URL: https://portainer.rockchin.top
+          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
+          SERVER_DEPLOY_PAT: ${{ secrets.SERVER_DEPLOY_PAT }}
+          ENDPOINT: "22"
+          STACK: "135"
+          IMAGE: ghcr.io/${{ github.repository }}
         run: |
-          if [ -z "$PORTAINER_WEBHOOK" ]; then
-            echo "::error::PORTAINER_WEBHOOK secret not set — image pushed but redeploy skipped."
+          if [ -z "$PORTAINER_API_KEY" ] || [ -z "$SERVER_DEPLOY_PAT" ]; then
+            echo "::error::PORTAINER_API_KEY / SERVER_DEPLOY_PAT not set — image pushed but redeploy skipped."
             exit 1
           fi
-          # The Portainer stack webhook force-pulls the new :latest and
-          # redeploys the git-managed sys0 stack. It returns 204 on success.
-          # Retry a few times: jp09->Portainer or Portainer->ghcr.io can hit a
-          # transient TLS-handshake timeout on the image pull.
-          ok=0
-          for i in 1 2 3 4 5; do
-            code=$(curl -sS -o /tmp/wh.out -w '%{http_code}' -X POST "$PORTAINER_WEBHOOK" || echo 000)
-            echo "==> webhook attempt $i -> HTTP $code"
-            if [ "$code" = "204" ] || [ "$code" = "200" ]; then ok=1; break; fi
-            cat /tmp/wh.out 2>/dev/null || true
-            sleep 10
-          done
-          if [ "$ok" != "1" ]; then
-            echo "::error::Portainer webhook did not return 2xx after retries."
-            exit 1
-          fi
-          echo "==> redeploy triggered OK"
+          python3 .github/scripts/portainer_deploy.py
