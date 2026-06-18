@@ -20,6 +20,8 @@ const (
 	MethodShellInput  = "shell.input"
 	MethodShellResize = "shell.resize"
 	MethodShellClose  = "shell.close"
+	MethodShellList   = "shell.list"   // list persistent PTY shells on the node
+	MethodShellOutput = "shell.output" // fetch a shell's buffered scrollback
 	MethodHostInfo    = "host.info"
 	MethodHostMetrics = "host.metrics"
 	MethodHostWatch   = "host.watch"
@@ -84,12 +86,40 @@ type ShellRunResult struct {
 
 type ShellOpenParams struct {
 	Shell string `json:"shell,omitempty"` // bash, sh; default auto
+	Name  string `json:"name,omitempty"`  // optional friendly label for the tab
 	Cols  int    `json:"cols,omitempty"`
 	Rows  int    `json:"rows,omitempty"`
 }
 
 type ShellOpenResult struct {
 	Session string `json:"session"`
+}
+
+// ShellInfo describes a persistent interactive shell living on the agent.
+type ShellInfo struct {
+	Session string `json:"session"`
+	Name    string `json:"name"`
+	Shell   string `json:"shell"`
+	State   string `json:"state"` // running | exited
+	Exit    int    `json:"exit"`
+	Cols    int    `json:"cols"`
+	Rows    int    `json:"rows"`
+	Started int64  `json:"started"`
+}
+
+type ShellListResult struct {
+	Sessions []ShellInfo `json:"sessions"`
+}
+
+type ShellRefParams struct {
+	Session string `json:"session"`
+}
+
+type ShellOutputResult struct {
+	Session string `json:"session"`
+	Data    string `json:"data"` // base64 of the recent output ring buffer
+	State   string `json:"state"`
+	Exit    int    `json:"exit"`
 }
 
 type ShellInputParams struct {

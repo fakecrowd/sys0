@@ -196,6 +196,10 @@ func (a *Agent) handle(ctx context.Context, method string, params json.RawMessag
 		return a.doShellResize(params)
 	case wire.MethodShellClose:
 		return a.doShellClose(params)
+	case wire.MethodShellList:
+		return a.doShellList(params)
+	case wire.MethodShellOutput:
+		return a.doShellOutput(params)
 	case wire.MethodTaskStart:
 		return a.doTaskStart(params)
 	case wire.MethodTaskInput:
@@ -248,6 +252,15 @@ func (a *Agent) handle(ctx context.Context, method string, params json.RawMessag
 }
 
 func (a *Agent) onNotify(method string, params json.RawMessage) {}
+
+// currentPeer returns the live hub peer, or nil if not currently connected.
+// Long-lived readers (shells, tasks) call this on every emit so their output
+// follows the agent across reconnects instead of pinning a stale peer.
+func (a *Agent) currentPeer() *rpc.Peer {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.peer
+}
 
 func (a *Agent) doHostWatch(params json.RawMessage) (any, *rpc.Error) {
 	var p wire.HostWatchParams

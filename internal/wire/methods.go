@@ -40,7 +40,7 @@ var NodeMethods = []MethodSpec{
 	{
 		Name: MethodShellOpen, Scope: "node", Dangerous: true, Interactive: true,
 		Description:  "打开一个交互式 PTY shell 会话（透传系统控制台），输出经 emit 流式推送。",
-		ParamsSchema: obj(map[string]any{"shell": str(), "cols": intg(), "rows": intg()}),
+		ParamsSchema: obj(map[string]any{"shell": str(), "name": str(), "cols": intg(), "rows": intg()}),
 	},
 	{
 		Name: MethodShellInput, Scope: "node", Dangerous: true, Interactive: true,
@@ -55,6 +55,16 @@ var NodeMethods = []MethodSpec{
 	{
 		Name: MethodShellClose, Scope: "node", Interactive: true,
 		Description:  "关闭交互式 shell 会话。",
+		ParamsSchema: obj(map[string]any{"session": str()}, "session"),
+	},
+	{
+		Name: MethodShellList, Scope: "node",
+		Description:  "列出本节点上常驻的交互式 shell 会话（重连后可复用）。",
+		ParamsSchema: obj(map[string]any{}),
+	},
+	{
+		Name: MethodShellOutput, Scope: "node",
+		Description:  "获取某个常驻 shell 会话的历史输出缓冲（base64，用于重连后回放）。",
 		ParamsSchema: obj(map[string]any{"session": str()}, "session"),
 	},
 	{
