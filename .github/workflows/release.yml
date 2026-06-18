@@ -72,6 +72,11 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ needs.version.outputs.version }}
+          # Hosted-hub connection defaults baked into the standalone /dl agent.
+          # Override via repository/organization variables of the same name.
+          SYS0_DEFAULT_HUB: ${{ vars.SYS0_DEFAULT_HUB || 'sys0.facrd.xyz' }}
+          SYS0_DEFAULT_TRANSPORT: ${{ vars.SYS0_DEFAULT_TRANSPORT || 'wss' }}
+          SYS0_DEFAULT_KEY: ${{ vars.SYS0_DEFAULT_KEY || 'devkey' }}
         run: |
           set -e
           ext=""
@@ -79,6 +84,8 @@ jobs:
           ldflags="-s -w -X main.version=$VERSION"
           dist="sys0_${VERSION}_${GOOS}_${GOARCH}"
           mkdir -p "$dist"
+          # Bundled binaries keep localhost defaults (good for self-hosters who
+          # run their own hub from the same tarball).
           go build -trimpath -ldflags "$ldflags" -o "$dist/sys0-hub$ext" ./sys0-hub
           go build -trimpath -ldflags "$ldflags" -o "$dist/sys0-agent$ext" ./sys0-agent
           cp README.md "$dist/" 2>/dev/null || true
@@ -89,10 +96,13 @@ jobs:
             tar czf "$dist.tar.gz" "$dist"
             echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
           fi
-          # Also publish a STANDALONE agent binary so the hub's /dl page can
-          # offer a direct download per platform (name carries os/arch).
+          # Publish a STANDALONE agent for the hub's /dl page. This one bakes in
+          # the hosted hub's connection defaults so a zero-arg launch (e.g. a
+          # double-click) connects straight to ${SYS0_DEFAULT_HUB} over wss.
+          # Override defaults via repo/org variables if the hosted hub moves.
+          agent_ldflags="$ldflags             -X main.defaultHub=${SYS0_DEFAULT_HUB}             -X main.defaultTransport=${SYS0_DEFAULT_TRANSPORT}             -X main.defaultKey=${SYS0_DEFAULT_KEY}"
           agent_asset="sys0-agent_${VERSION}_${GOOS}_${GOARCH}${ext}"
-          cp "$dist/sys0-agent$ext" "$agent_asset"
+          go build -trimpath -ldflags "$agent_ldflags" -o "$agent_asset" ./sys0-agent
           echo "AGENT_ASSET=$agent_asset" >> "$GITHUB_ENV"
 
       - name: Upload to release

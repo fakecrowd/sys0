@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -319,10 +320,25 @@ func (a *Agent) dialer() (transport.Dialer, error) {
 	case "", "tcp":
 		return transport.TCPDialer{Addr: a.cfg.Hub}, nil
 	case "ws":
-		return transport.WSDialer{URL: "ws://" + a.cfg.Hub + "/agent"}, nil
+		return transport.WSDialer{URL: "ws://" + wsHost(a.cfg.Hub) + "/agent"}, nil
+	case "wss":
+		return transport.WSDialer{URL: "wss://" + wsHost(a.cfg.Hub) + "/agent"}, nil
 	default:
 		return nil, fmt.Errorf("unknown transport %q", a.cfg.Transport)
 	}
+}
+
+// wsHost normalises the configured hub into a host[:port] suitable for a
+// ws:// or wss:// URL. It tolerates a value that already carries a scheme or a
+// trailing /agent path so that -hub wss://sys0.facrd.xyz and -hub
+// sys0.facrd.xyz both work.
+func wsHost(h string) string {
+	for _, p := range []string{"wss://", "ws://", "https://", "http://"} {
+		h = strings.TrimPrefix(h, p)
+	}
+	h = strings.TrimSuffix(h, "/agent")
+	h = strings.TrimSuffix(h, "/")
+	return h
 }
 
 func capabilities() []string {
