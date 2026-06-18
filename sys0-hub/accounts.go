@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -240,31 +242,76 @@ var dlCache releaseCache
 
 const releaseSource = "https://api.github.com/repos/fakecrowd/sys0/releases/latest"
 
-// apiReleases proxies the latest GitHub release's agent assets for the /dl page.
-// Public (no auth) so operators can grab the agent binary easily.
-func (h *Hub) apiReleases(c *gin.Context) {
+// cachedReleasePayload returns the compact, agent-only release payload (the same
+// JSON served at /api/v1/releases), memoized for 5 minutes. Shared by the /dl
+// list handler and the /agent redirect handler.
+func cachedReleasePayload() ([]byte, error) {
 	dlCache.mu.Lock()
 	defer dlCache.mu.Unlock()
 	if time.Since(dlCache.fetched) < 5*time.Minute && dlCache.payload != nil {
-		c.Data(dlCache.status, "application/json", dlCache.payload)
-		return
+		return dlCache.payload, nil
 	}
-
 	req, _ := http.NewRequest("GET", releaseSource, nil)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "sys0-hub")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": "fetch releases: " + err.Error()})
-		return
+		return nil, fmt.Errorf("fetch releases: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
-
-	// Re-shape into a compact, agent-only asset list.
 	payload := buildReleasePayload(raw, version)
 	dlCache.fetched = time.Now()
 	dlCache.payload = payload
 	dlCache.status = http.StatusOK
+	return payload, nil
+}
+
+// apiReleases proxies the latest GitHub release's agent assets for the /dl page.
+// Public (no auth) so operators can grab the agent binary easily.
+func (h *Hub) apiReleases(c *gin.Context) {
+	payload, err := cachedReleasePayload()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
 	c.Data(http.StatusOK, "application/json", payload)
+}
+
+// apiAgentRedirect 302-redirects to the download URL of the latest agent binary
+// matching ?os=&arch=. This lets a minimal client (e.g. sys0-rescue) fetch the
+// right agent with a single GET + redirect-follow, no JSON parsing required.
+// os/arch default to the requester is irrelevant server-side; caller must pass
+// them (linux|darwin|windows, amd64|arm64). Public, no auth.
+func (h *Hub) apiAgentRedirect(c *gin.Context) {
+	wantOS := strings.ToLower(c.Query("os"))
+	wantArch := strings.ToLower(c.Query("arch"))
+	if wantOS == "" || wantArch == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "os and arch query params required"})
+		return
+	}
+	payload, err := cachedReleasePayload()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	var parsed struct {
+		OK     bool `json:"ok"`
+		Assets []struct {
+			URL  string `json:"url"`
+			OS   string `json:"os"`
+			Arch string `json:"arch"`
+		} `json:"assets"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil || !parsed.OK {
+		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": "release list unavailable"})
+		return
+	}
+	for _, a := range parsed.Assets {
+		if a.OS == wantOS && a.Arch == wantArch && a.URL != "" {
+			c.Redirect(http.StatusFound, a.URL)
+			return
+		}
+	}
+	c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no agent asset for " + wantOS + "/" + wantArch})
 }
