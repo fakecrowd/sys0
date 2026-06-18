@@ -114,7 +114,15 @@ func (a *Agent) doShellOpen(params json.RawMessage) (any, *rpc.Error) {
 	// Reader: buffer everything, and best-effort stream to the current console.
 	// Crucially it re-fetches the live peer each emit and NEVER tears the shell
 	// down on a failed emit — the shell outlives any single console session.
+	// This goroutine is the SOLE owner of cmd.Wait() and the final ptmx.Close():
+	// closeShell must never call Wait() itself, or the concurrent Wait races and
+	// panics (see closeShell). The recover keeps any fault from killing the agent.
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				a.log.Error("shell reader panic", "session", id, "err", r)
+			}
+		}()
 		buf := make([]byte, 8192)
 		seq := 0
 		for {
@@ -255,16 +263,19 @@ func (a *Agent) closeShell(id string) {
 	if sess == nil {
 		return
 	}
+	// Signal the shell to exit by killing its process. That makes the reader
+	// goroutine's ptmx.Read return an error, after which the reader -- the SOLE
+	// owner of cmd.Wait() and ptmx.Close() -- tears the PTY down. We must NOT
+	// call cmd.Wait() or ptmx.Close() here: neither go-pty's Cmd.wait nor
+	// unixPty.Close is concurrency-safe, so doing either alongside the reader
+	// races (double Wait / double Close) and the unrecovered panic would take
+	// down the whole agent.
 	sess.mu.Lock()
-	ptmx := sess.pty
 	cmd := sess.cmd
 	sess.state = "exited"
 	sess.mu.Unlock()
-	if ptmx != nil {
-		ptmx.Close()
-	}
-	if cmd != nil {
-		cmd.Wait()
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
 	}
 	if peer := a.currentPeer(); peer != nil {
 		data, _ := json.Marshal(map[string]any{"session": id, "closed": true})
