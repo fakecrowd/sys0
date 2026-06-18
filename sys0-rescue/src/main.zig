@@ -64,6 +64,7 @@ pub const Config = struct {
     key: []const u8 = default_key,
     data_dir: []const u8 = "",
     once: bool = false,
+    no_install: bool = false,
     min_backoff_ms: u64 = 1_000,
     max_backoff_ms: u64 = 60_000,
     healthy_uptime_ms: u64 = 30_000,
@@ -563,6 +564,8 @@ fn parseArgs(gpa: std.mem.Allocator, env: *std.process.Environ.Map, args: std.pr
             cfg.key = try gpa.dupe(u8, it.next() orelse return error.MissingValue);
         } else if (std.mem.eql(u8, arg, "--once")) {
             cfg.once = true;
+        } else if (std.mem.eql(u8, arg, "--no-install")) {
+            cfg.no_install = true;
         } else if (std.mem.eql(u8, arg, "install")) {
             action = .install;
         } else if (std.mem.eql(u8, arg, "uninstall")) {
@@ -593,6 +596,7 @@ fn printUsage() void {
         \\  --hub HOST       hub hostname (default {s}, env SYS0_HUB)
         \\  --data-dir DIR   agent run dir (env SYS0_DATA_DIR; default per-user)
         \\  --once           bootstrap + spawn once, then exit (no supervision)
+        \\  --no-install     do NOT auto-register autostart on first run
     , .{default_hub});
 }
 
@@ -633,6 +637,17 @@ pub fn main(init: std.process.Init) !void {
     const agent_path = try std.fmt.bufPrint(&agent_path_buf, "{s}{c}{s}", .{ cfg.data_dir, sep, agent_filename });
 
     logLine("starting · hub={s} os={s} arch={s} data_dir={s}", .{ cfg.hub, os_name, arch_name, cfg.data_dir });
+
+    // AUTO-REGISTER AUTOSTART on a normal run (idempotent, best-effort). The
+    // whole point of rescue is "install it once and it keeps the agent alive
+    // across reboots" — users shouldn't have to remember a separate `install`
+    // subcommand. Skipped for --once (throwaway) and --no-install (opt-out).
+    // Never fatal: a failure here must not stop the supervisor from running.
+    if (!cfg.once and !cfg.no_install) {
+        install.installAutostart(gpa, io, env, cfg) catch |err| {
+            logLine("autostart registration failed (continuing): {s}", .{@errorName(err)});
+        };
+    }
 
     // CONNECT FIRST: generate/load the agent fingerprint and announce to the hub
     // BEFORE downloading anything. The agent inherits this exact fingerprint

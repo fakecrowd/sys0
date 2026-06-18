@@ -257,7 +257,7 @@ fn installWindows(gpa: std.mem.Allocator, io: Io, env: *Map, cfg: root.Config, s
     // Per-user autostart, no admin required: HKCU Run value launching rescue.
     // (The standalone agent is already a GUI-subsystem binary, and rescue is a
     // console binary; a future --silent could hide its window if desired.)
-    const cmd = try std.fmt.allocPrint(gpa, "\"{s}\" --hub {s} --data-dir {s}", .{ self_path, cfg.hub, cfg.data_dir });
+    const cmd = try std.fmt.allocPrint(gpa, "\"{s}\" --hub {s} --data-dir \"{s}\"", .{ self_path, cfg.hub, cfg.data_dir });
     _ = run(io, &.{
         "reg", "add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
         "/v",  service_name, "/t", "REG_SZ", "/d", cmd, "/f",
