@@ -1,0 +1,13 @@
+.git
+bin/
+*.db
+*.db-*
+*.log
+sys0-console/node_modules/
+node_modules/
+**/node_modules/
+sys0-console/tsconfig.tsbuildinfo
+vendor/
+docs/
+*.md
+.github/

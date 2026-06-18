@@ -1,0 +1,68 @@
+name: Deploy (prod)
+
+# Push to deploy/prod -> build the single hub image, push to GHCR,
+# then ping the Portainer stack webhook on jp09 to repull & redeploy.
+on:
+  push:
+    branches: [deploy/prod]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: true
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: v
+        run: echo "version=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            VERSION=${{ steps.v.outputs.version }}
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
+          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Portainer redeploy (jp09 stack webhook)
+        env:
+          HOOK: ${{ secrets.PORTAINER_WEBHOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::error::PORTAINER_WEBHOOK secret not set — image pushed but redeploy skipped."
+            exit 1
+          fi
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$HOOK")
+          echo "Portainer webhook responded HTTP $code"
+          case "$code" in 2*|204) echo "redeploy triggered ok";; *) echo "::error::webhook HTTP $code"; exit 1;; esac
