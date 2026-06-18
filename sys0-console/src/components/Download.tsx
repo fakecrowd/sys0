@@ -110,9 +110,14 @@ export function Download() {
                 <code>./sys0-agent -hub &lt;host&gt; -transport wss -key &lt;ACCESS_KEY&gt; -label &lt;name&gt;</code>
               </div>
               <div style={{ opacity: 0.6, marginTop: 10 }}>
-                守护/开机自启:下载 <code>sys0-rescue</code> 后运行{" "}
-                <code>sys0-rescue install</code>{" "}
-                即自动下载并保活 agent、注册开机自启(有管理员=系统级,普通用户=登录级,无需 root)。
+                守护/开机自启:下载 <code>sys0-rescue</code> 后<strong>直接双击运行一次即可</strong>——
+                它会自动下载并保活 agent,并<strong>自动注册开机自启,无需管理员</strong>
+                (有管理员=系统级,普通用户=登录级)。之后开机/登录都会自动拉起,断了也会自愈重连。
+                <br />
+                <span style={{ opacity: 0.85 }}>
+                  不想注册自启加 <code>--no-install</code>;手动管理用{" "}
+                  <code>sys0-rescue install</code> / <code>sys0-rescue uninstall</code>。
+                </span>
               </div>
             </div>
           </>
