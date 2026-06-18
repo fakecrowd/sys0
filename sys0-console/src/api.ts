@@ -44,6 +44,7 @@ export type MethodSpec = {
 const TOKEN_KEY = "sys0_token";
 const ROLE_KEY = "sys0_role";
 const USER_KEY = "sys0_user";
+const CRED_KEY = "sys0_cred"; // remembered credentials (obfuscated)
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
 export const getRole = () => localStorage.getItem(ROLE_KEY) || "member";
@@ -59,7 +60,51 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
-async function req<T>(method: string, path: string, body?: any): Promise<T> {
+// --- "remember password": store creds locally so a 12h token expiry is
+// transparently refreshed via silent re-login. Obfuscated (base64), NOT
+// encryption — localStorage is already same-origin; this just avoids
+// plaintext-at-a-glance. The browser's own password manager is the real vault.
+export function rememberCreds(username: string, password: string) {
+  try { localStorage.setItem(CRED_KEY, btoa(unescape(encodeURIComponent(JSON.stringify([username, password]))))); } catch {}
+}
+export function forgetCreds() { localStorage.removeItem(CRED_KEY); }
+export function hasRemembered() { return !!localStorage.getItem(CRED_KEY); }
+export function getRememberedUser(): string {
+  const c = readCreds(); return c ? c[0] : "";
+}
+function readCreds(): [string, string] | null {
+  const raw = localStorage.getItem(CRED_KEY);
+  if (!raw) return null;
+  try { const a = JSON.parse(decodeURIComponent(escape(atob(raw)))); return Array.isArray(a) && a.length === 2 ? [a[0], a[1]] : null; } catch { return null; }
+}
+
+let reloginPromise: Promise<boolean> | null = null;
+// Attempt a silent re-login using remembered creds. De-duped so concurrent
+// 401s only fire one login. Returns true if a fresh token was installed.
+async function trySilentRelogin(): Promise<boolean> {
+  if (reloginPromise) return reloginPromise;
+  const creds = readCreds();
+  if (!creds) return false;
+  reloginPromise = (async () => {
+    try {
+      const res = await fetch("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: creds[0], password: creds[1] }),
+      });
+      const r = await res.json();
+      if (r && r.ok && r.token) {
+        setSession(r.token, r.role || "member", r.username || creds[0]);
+        return true;
+      }
+    } catch {}
+    forgetCreds(); // creds no longer valid (password changed etc.)
+    return false;
+  })();
+  try { return await reloginPromise; } finally { reloginPromise = null; }
+}
+
+async function req<T>(method: string, path: string, body?: any, _retried = false): Promise<T> {
   const headers: Record<string, string> = {};
   const tok = getToken();
   if (tok) headers["Authorization"] = "Bearer " + tok;
@@ -70,6 +115,11 @@ async function req<T>(method: string, path: string, body?: any): Promise<T> {
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) {
+    // Token expired (12h TTL). If we have remembered creds, silently
+    // re-login and replay the request once before giving up.
+    if (!_retried && (await trySilentRelogin())) {
+      return req<T>(method, path, body, true);
+    }
     clearSession();
     location.reload();
     throw new Error("unauthorized");

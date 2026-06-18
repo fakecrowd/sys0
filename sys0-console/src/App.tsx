@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, type Node, type RescueInfo } from "./api";
+import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, rememberCreds, forgetCreds, hasRemembered, getRememberedUser, type Node, type RescueInfo } from "./api";
 import { Shell } from "./components/Shell";
 import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
@@ -50,16 +50,21 @@ function AppRoot() {
 }
 
 function Login({ onAuthed }: { onAuthed: () => void }) {
-  const [u, setU] = useState("");
+  const [u, setU] = useState(getRememberedUser());
   const [p, setP] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [remember, setRemember] = useState(hasRemembered());
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true); setErr("");
     try {
       const r = await api.login(u, p);
-      if (r.ok && r.token) { setSession(r.token, r.role || "member", r.username || u); onAuthed(); }
+      if (r.ok && r.token) {
+        setSession(r.token, r.role || "member", r.username || u);
+        if (remember) rememberCreds(u, p); else forgetCreds();
+        onAuthed();
+      }
       else setErr(r.error || "login failed");
     } catch { setErr("network error"); } finally { setBusy(false); }
   };
@@ -74,7 +79,11 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
         <label className="mono-sm">USER</label>
         <input className="input mt-1 mb-3" value={u} autoComplete="off" placeholder="用户名 / username" onChange={(e) => setU(e.target.value)} />
         <label className="mono-sm">PASSWORD</label>
-        <input className="input mt-1 mb-4" type="password" value={p} autoComplete="new-password" placeholder="密码 / password" onChange={(e) => setP(e.target.value)} />
+        <input className="input mt-1 mb-3" type="password" value={p} autoComplete="current-password" placeholder="密码 / password" onChange={(e) => setP(e.target.value)} />
+        <label className="flex items-center gap-2 mb-4 mono-sm" style={{ cursor: "pointer", userSelect: "none" }}>
+          <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} style={{ accentColor: "var(--accent)", width: 16, height: 16 }} />
+          记住密码 / remember me
+        </label>
         {err && <div className="mb-3" style={{ color: "var(--danger)" }}>{err}</div>}
         <button className="btn btn-accent w-full justify-center" disabled={busy}>
           {busy ? "..." : "登录 / LOGIN"}
@@ -130,7 +139,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <span className="mono-sm hide-sm">/ console</span>
         </div>
         <div className="flex items-center gap-3 min-w-0">
-          <span className="mono-sm truncate">{nodes.length} online · {targets.length} sel · {getRole()}</span>
+          <span className="mono-sm truncate">{nodes.filter((n) => n.state === "online").length} online · {targets.length} sel · {getRole()}</span>
           <button className="btn" onClick={onLogout}>退出</button>
         </div>
       </header>
