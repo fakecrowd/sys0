@@ -57,6 +57,7 @@ func (h *Hub) Router() http.Handler {
 	v1.GET("/releases", h.apiReleases) // public: agent download list (/dl page)
 	v1.GET("/agent", h.apiAgentRedirect)  // public: 302 to latest matching agent binary
 	v1.GET("/rescue", h.apiRescueRedirect) // public: 302 to latest matching rescue binary
+	v1.POST("/rescue/report", h.apiRescueReport) // public: rescue liveness report (pre-shared key)
 
 	auth := v1.Group("", h.authMW())
 	auth.GET("/me", h.apiMe)

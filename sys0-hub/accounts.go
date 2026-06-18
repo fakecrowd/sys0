@@ -347,3 +347,64 @@ func assetURLFor(payload []byte, kind, wantOS, wantArch string) (string, bool) {
 	}
 	return "", false
 }
+
+// ---- rescue liveness (sys0-rescue -> hub binding) ----
+
+// rescueInfo records the last report from a node's supervising rescue process.
+type rescueInfo struct {
+	version  string
+	lastSeen time.Time
+}
+
+// rescueReports tracks, per node id, the most recent rescue report. A node is
+// considered "rescue-supervised" if its last report is within rescueTTL.
+var (
+	rescueMu      sync.Mutex
+	rescueReports = map[string]rescueInfo{}
+)
+
+const rescueTTL = 90 * time.Second
+
+// rescueStatus returns whether the node currently has a live rescue and its
+// reported version.
+func rescueStatus(nodeID string) (bool, string) {
+	rescueMu.Lock()
+	defer rescueMu.Unlock()
+	info, ok := rescueReports[nodeID]
+	if !ok || time.Since(info.lastSeen) > rescueTTL {
+		return false, ""
+	}
+	return true, info.version
+}
+
+// apiRescueReport accepts a small JSON report from a sys0-rescue process. It is
+// authenticated by the same pre-shared agent key. The node id is derived from
+// the agent fingerprint exactly as UpsertNode does ("n" + fingerprint[:6]), so
+// the rescue binds to the same node the agent registers — no DB write needed.
+func (h *Hub) apiRescueReport(c *gin.Context) {
+	var body struct {
+		Key         string `json:"key"`
+		Fingerprint string `json:"fingerprint"`
+		Version     string `json:"version"`
+		OS          string `json:"os"`
+		Arch        string `json:"arch"`
+	}
+	if c.BindJSON(&body) != nil {
+		return
+	}
+	if body.Key != h.cfg.AccessKey {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "invalid access key"})
+		return
+	}
+	if len(body.Fingerprint) < 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "invalid fingerprint"})
+		return
+	}
+	nodeID := "n" + body.Fingerprint[:6]
+	rescueMu.Lock()
+	rescueReports[nodeID] = rescueInfo{version: body.Version, lastSeen: time.Now()}
+	rescueMu.Unlock()
+	// nudge consoles so the rescue badge appears without waiting for a refresh
+	h.reg.broadcast("node", "event.node", gin.H{"event": "rescue", "id": nodeID, "rescueVersion": body.Version})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID})
+}

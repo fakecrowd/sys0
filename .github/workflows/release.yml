@@ -137,8 +137,22 @@ jobs:
           esac
           if [ -n "$ztarget" ]; then
             rescue_asset="sys0-rescue_${VERSION}_${GOOS}_${GOARCH}${ext}"
-            ( cd sys0-rescue && zig build-exe src/main.zig -O ReleaseSmall -target "$ztarget" -fstrip --name sys0-rescue )
-            mv "sys0-rescue/sys0-rescue${ext}" "$rescue_asset"
+            # Bake the hosted-hub defaults + version into the standalone /dl rescue
+            # (single-file Zig builds can't take -X linker defines, so patch the
+            # source consts in a throwaway copy before compiling).
+            rm -rf /tmp/rescue-build && cp -r sys0-rescue /tmp/rescue-build
+            sed -i \
+              -e "s|^const default_hub = .*|const default_hub = \"${SYS0_DEFAULT_HUB}\";|" \
+              -e "s|^pub const default_key = .*|pub const default_key = \"${SYS0_DEFAULT_KEY}\";|" \
+              -e "s|^pub const rescue_version = .*|pub const rescue_version = \"${VERSION}\";|" \
+              /tmp/rescue-build/src/main.zig
+            # On Windows the /dl rescue is double-clicked, so link it as a GUI
+            # subsystem binary: it runs with NO console window (logs go to a file
+            # in the data dir — see newLogSink). Other targets stay console.
+            zig_extra=""
+            [ "$GOOS" = "windows" ] && zig_extra="--subsystem windows"
+            ( cd /tmp/rescue-build && zig build-exe src/main.zig -O ReleaseSmall -target "$ztarget" $zig_extra -fstrip --name sys0-rescue )
+            mv "/tmp/rescue-build/sys0-rescue${ext}" "$rescue_asset"
             echo "RESCUE_ASSET=$rescue_asset" >> "$GITHUB_ENV"
           fi
 

@@ -266,6 +266,10 @@ function NodeCard({
         <span className="dot" style={{ background: offline ? "var(--muted)" : "var(--accent)" }} />
         <span style={{ color: on ? "var(--accent)" : "var(--fg)" }}>{n.label}</span>
         {offline && <span className="tag" style={{ color: "var(--muted)" }}>offline</span>}
+        {n.rescue && (
+          <span className="tag" title={`sys0-rescue 守护中${n.rescueVersion ? " · " + n.rescueVersion : ""}`}
+            style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>rescue</span>
+        )}
         <span className="mono-sm ml-auto">{n.id}</span>
       </div>
       <div className="mono-sm mt-1.5">{n.host.os}/{n.host.arch} · {n.host.ip || "—"}</div>

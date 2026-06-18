@@ -8,6 +8,8 @@ export type Node = {
   version: string;
   state: string;
   lastSeen: number;
+  rescue?: boolean;
+  rescueVersion?: string;
 };
 
 export type DispatchItem = {

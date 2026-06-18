@@ -28,13 +28,15 @@ type nodeSession struct {
 
 // NodeView is the JSON shape returned to clients.
 type NodeView struct {
-	ID       string           `json:"id"`
-	Label    string           `json:"label"`
-	Tags     []string         `json:"tags"`
-	Host     wire.HostSummary `json:"host"`
-	Version  string           `json:"version"`
-	State    string           `json:"state"`
-	LastSeen int64            `json:"lastSeen"`
+	ID            string           `json:"id"`
+	Label         string           `json:"label"`
+	Tags          []string         `json:"tags"`
+	Host          wire.HostSummary `json:"host"`
+	Version       string           `json:"version"`
+	State         string           `json:"state"`
+	LastSeen      int64            `json:"lastSeen"`
+	Rescue        bool             `json:"rescue"`        // a sys0-rescue is supervising this node
+	RescueVersion string           `json:"rescueVersion"` // reported rescue build
 }
 
 func (n *nodeSession) view() NodeView {
@@ -44,9 +46,11 @@ func (n *nodeSession) view() NodeView {
 	if tags == nil {
 		tags = []string{}
 	}
+	live, rv := rescueStatus(n.nodeID)
 	return NodeView{
 		ID: n.nodeID, Label: n.label, Tags: tags, Host: n.host,
 		Version: n.version, State: "online", LastSeen: n.lastSeen.Unix(),
+		Rescue: live, RescueVersion: rv,
 	}
 }
 
@@ -56,10 +60,12 @@ func nodeViewFromRecord(r Node) NodeView {
 	if r.Tags != "" {
 		tags = strings.Split(r.Tags, ",")
 	}
+	live, rv := rescueStatus(r.ID)
 	return NodeView{
 		ID: r.ID, Label: r.Label, Tags: tags,
 		Host:    wire.HostSummary{Name: r.Label, OS: r.OS, Arch: r.Arch, Kernel: r.Kernel, IP: r.IP},
 		Version: r.AgentVersion, State: "offline", LastSeen: r.LastSeen,
+		Rescue: live, RescueVersion: rv,
 	}
 }
 

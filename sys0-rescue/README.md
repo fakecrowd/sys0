@@ -35,6 +35,25 @@ recover them even when they are broken.
    boot/login. Because rescue supervises the agent, **registering rescue starts
    both rescue and the agent automatically** — no competing autostart entries.
 
+## Hub binding (rescue ↔ hub)
+
+Beyond supervising the agent locally, the rescue keeps a lightweight link to the
+hub so its presence shows up in the console:
+
+- Once the supervised agent has produced its identity file (`sys0-agent.id`,
+  created only after the agent runs), the rescue periodically `POST`s a small
+  report to `https://<hub>/api/v1/rescue/report` with the agent's fingerprint,
+  authenticated by the same pre-shared key.
+- The hub derives the **same node id** the agent uses (`n` + fingerprint[:6]),
+  so the rescue **binds to the very node the agent registered**. The node then
+  shows a `rescue` badge (and the rescue version) in the console / `/api/v1/nodes`.
+- This is deliberately minimal — a periodic HTTPS report, no WebSocket / no
+  remote-control surface. It answers "is this node's agent being supervised?",
+  nothing more.
+
+This means the binding naturally appears **after the agent starts and connects**
+(no agent id → no report), exactly as intended.
+
 ## Boot autostart & privileges
 
 `install` **auto-detects privilege** and picks the right scope:
