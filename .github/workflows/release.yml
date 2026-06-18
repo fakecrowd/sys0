@@ -101,6 +101,14 @@ jobs:
           # double-click) connects straight to ${SYS0_DEFAULT_HUB} over wss.
           # Override defaults via repo/org variables if the hosted hub moves.
           agent_ldflags="$ldflags             -X main.defaultHub=${SYS0_DEFAULT_HUB}             -X main.defaultTransport=${SYS0_DEFAULT_TRANSPORT}             -X main.defaultKey=${SYS0_DEFAULT_KEY}"
+          # On Windows the standalone agent is meant to be double-clicked, so
+          # link it as a GUI subsystem binary (-H=windowsgui): it runs silently
+          # in the background with NO console window popping up. (The bundled
+          # tarball agent above keeps the console subsystem so self-hosters
+          # running it from a shell still see logs.)
+          if [ "$GOOS" = "windows" ]; then
+            agent_ldflags="$agent_ldflags -H=windowsgui"
+          fi
           agent_asset="sys0-agent_${VERSION}_${GOOS}_${GOARCH}${ext}"
           go build -trimpath -ldflags "$agent_ldflags" -o "$agent_asset" ./sys0-agent
           echo "AGENT_ASSET=$agent_asset" >> "$GITHUB_ENV"

@@ -63,6 +63,18 @@ type Peer struct {
 	handler Handler
 	notify  NotifyHandler
 
+	// async, when non-nil, decides which inbound request methods are served on
+	// their own goroutine. Requests for which it returns false are served
+	// INLINE in the read loop, which preserves their arrival order — essential
+	// for interactive terminal input (task.input/shell.input/resize), where
+	// concurrent goroutines would otherwise race to write the PTY and scramble
+	// the echoed characters. Long-blocking requests (e.g. shell.run) should
+	// return true so they don't stall the connection (heartbeats, later input).
+	// It receives the raw params too, so a wrapper method (e.g. the hub's
+	// "dispatch") can peek at the inner call to classify it. When nil, every
+	// request is served on its own goroutine (legacy behavior).
+	async func(method string, params json.RawMessage) bool
+
 	mu      sync.Mutex
 	pending map[string]chan *Message
 	seq     uint64
@@ -74,6 +86,11 @@ type Peer struct {
 func NewPeer(conn transport.Conn, handler Handler, notify NotifyHandler) *Peer {
 	return &Peer{conn: conn, handler: handler, notify: notify, pending: map[string]chan *Message{}}
 }
+
+// SetAsyncFunc installs a predicate deciding which inbound requests are
+// dispatched on their own goroutine vs. served inline (in arrival order).
+// Call once, before Run. See the Peer.async field for rationale.
+func (p *Peer) SetAsyncFunc(f func(method string, params json.RawMessage) bool) { p.async = f }
 
 // Run reads and dispatches messages until the connection fails or ctx is done.
 func (p *Peer) Run(ctx context.Context) error {
@@ -90,7 +107,14 @@ func (p *Peer) Run(ctx context.Context) error {
 		}
 		switch {
 		case m.Method != "" && m.ID != "": // request
-			go p.serve(ctx, &m)
+			// Serve inline (preserving arrival order) unless flagged async.
+			// Inline dispatch keeps fast interactive input (e.g. task.input ->
+			// PTY write) from being reordered by the goroutine scheduler.
+			if p.async != nil && !p.async(m.Method, m.Params) {
+				p.serve(ctx, &m)
+			} else {
+				go p.serve(ctx, &m)
+			}
 		case m.Method != "": // notification
 			if p.notify != nil {
 				p.notify(m.Method, m.Params)

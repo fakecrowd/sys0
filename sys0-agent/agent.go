@@ -101,6 +101,13 @@ func (a *Agent) session(ctx context.Context) error {
 	defer cancel()
 
 	peer := rpc.NewPeer(conn, a.handle, a.onNotify)
+	// Serve interactive/fast methods inline so their arrival order is preserved
+	// (e.g. rapid task.input keystrokes must hit the PTY in order, or the echo
+	// comes back scrambled). Only genuinely long-blocking methods run on their
+	// own goroutine, so they don't stall heartbeats or subsequent input.
+	peer.SetAsyncFunc(func(method string, _ json.RawMessage) bool {
+		return asyncMethods[method]
+	})
 	a.mu.Lock()
 	a.peer = peer
 	a.mu.Unlock()
@@ -161,6 +168,19 @@ func (a *Agent) heartbeatLoop(ctx context.Context, peer *rpc.Peer) {
 			}
 		}
 	}
+}
+
+// asyncMethods lists request methods that may block for a meaningful time and
+// therefore must NOT be served inline in the read loop (doing so would stall
+// heartbeats and later input). Everything else — notably the interactive input
+// methods (task.input/shell.input/*.resize) — is served inline to preserve
+// strict arrival order. See rpc.Peer.SetAsyncFunc.
+var asyncMethods = map[string]bool{
+	wire.MethodShellRun:  true, // runs a command to completion (up to timeout)
+	wire.MethodFsGet:     true, // reads a whole file
+	wire.MethodFsPut:     true, // writes a whole file
+	wire.MethodHostWatch: true, // may set up a streaming watcher
+	wire.MethodShutdown:  true, // self-terminates
 }
 
 // handle dispatches inbound requests from the hub.

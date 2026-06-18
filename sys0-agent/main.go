@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"flag"
-	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,12 +31,14 @@ func main() {
 	flag.StringVar(&dataDir, "data-dir", defaultDataDir(), "run directory for the id/lock files")
 	flag.Parse()
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-
+	// dataDir must exist before we can place a log file inside it (Windows GUI
+	// builds have no console, so logs go to a file there — see newLogger).
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		log.Error("data dir", "err", err)
+		// No logger yet; nothing we can usefully do but exit.
 		os.Exit(1)
 	}
+
+	log := newLogger(dataDir)
 	// single-instance lock: refuse to start if another agent owns this dir
 	lock, err := acquireLock(dataDir)
 	if err != nil {

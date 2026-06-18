@@ -381,9 +381,36 @@ func (h *Hub) serveStatic(c *gin.Context) {
 func (h *Hub) serveConsole(conn transport.Conn, actor Actor) {
 	sess := &consoleSession{topics: map[string]bool{}}
 	sess.peer = rpc.NewPeer(conn, h.consoleHandler(sess, actor), nil)
+	// Preserve ordering of interactive input coming from the browser. Each
+	// keystroke is a separate "dispatch" request wrapping an inner call (e.g.
+	// task.input); serving those inline keeps them strictly ordered on the way
+	// to the agent, so fast typing doesn't echo back scrambled. Non-interactive
+	// or potentially slow dispatches still run on their own goroutine.
+	sess.peer.SetAsyncFunc(consoleAsync)
 	h.reg.addConsole(sess)
 	defer h.reg.removeConsole(sess)
 	sess.peer.Run(context.Background())
+}
+
+// consoleAsync decides which console requests run on their own goroutine.
+// Interactive input dispatches are served inline (return false) to keep their
+// arrival order; everything else stays async so a slow fan-out can't block the
+// console connection.
+func consoleAsync(method string, params json.RawMessage) bool {
+	if method != "dispatch" {
+		return true
+	}
+	var p wire.DispatchParams
+	if err := json.Unmarshal(params, &p); err != nil {
+		return true
+	}
+	// Order-sensitive, fast methods: serve inline.
+	switch p.Call.Method {
+	case wire.MethodTaskInput, wire.MethodTaskResize,
+		wire.MethodShellInput, wire.MethodShellResize:
+		return false
+	}
+	return true
 }
 
 func (h *Hub) consoleHandler(sess *consoleSession, actor Actor) rpc.Handler {

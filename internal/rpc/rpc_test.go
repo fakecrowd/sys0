@@ -3,6 +3,8 @@ package rpc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -94,5 +96,82 @@ func TestPeerCallTimeout(t *testing.T) {
 	defer c()
 	if _, rerr := client.Call(cctx, "slow", nil); rerr == nil || rerr.Code != CodeTimeout {
 		t.Fatalf("expected timeout, got %v", rerr)
+	}
+}
+
+
+// TestInlineDispatchPreservesOrder is the regression guard for scrambled
+// terminal echo. It writes many request frames onto the wire in order WITHOUT
+// waiting for each response (mimicking rapid keystrokes), then asserts the
+// server processed them in the same order. Under the old unconditional
+// `go serve`, a handler that yields would let the scheduler reorder these;
+// inline dispatch (async() == false) must keep them ordered.
+func TestInlineDispatchPreservesOrder(t *testing.T) {
+	ca, cb := transport.Pipe()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const n = 50
+	done := make(chan struct{})
+	var mu sync.Mutex
+	var order []int
+
+	server := NewPeer(cb, func(ctx context.Context, method string, params json.RawMessage) (any, *Error) {
+		var p struct{ N int }
+		json.Unmarshal(params, &p)
+		// Yield so that, under goroutine-per-request dispatch, ordering would
+		// scramble. Inline dispatch cannot reorder because the read loop blocks
+		// here until we return.
+		time.Sleep(time.Millisecond)
+		mu.Lock()
+		order = append(order, p.N)
+		last := len(order) == n
+		mu.Unlock()
+		if last {
+			close(done)
+		}
+		return map[string]bool{"ok": true}, nil
+	}, nil)
+	server.SetAsyncFunc(func(method string, _ json.RawMessage) bool {
+		return method != "seq" // serve "seq" inline (ordered)
+	})
+	go server.Run(ctx)
+
+	// Write request frames directly onto the wire, in order, without waiting.
+	go func() {
+		for i := 0; i < n; i++ {
+			params, _ := json.Marshal(map[string]int{"N": i})
+			frame, _ := json.Marshal(&Message{
+				JSONRPC: "2.0",
+				ID:      fmt.Sprintf("r%d", i),
+				Method:  "seq",
+				Params:  params,
+			})
+			if err := ca.Write(frame); err != nil {
+				return
+			}
+		}
+	}()
+	// Drain responses so writes don't block on a full pipe.
+	go func() {
+		for {
+			if _, err := ca.Read(); err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout: only processed %d/%d", len(order), n)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	for i := 0; i < n; i++ {
+		if order[i] != i {
+			t.Fatalf("out-of-order: got %v", order)
+		}
 	}
 }
