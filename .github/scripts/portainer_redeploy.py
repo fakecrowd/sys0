@@ -76,8 +76,19 @@ def redeploy_stack():
 
 def main():
     print(f"==> pulling {IMAGE} on endpoint {EP} ...")
-    req(DOCKER + f"/images/create?fromImage=ghcr.io%2F{REPO.replace('/', '%2F')}&tag=latest",
-        "POST", None, raw=True)
+    # GHCR pulls from the remote node occasionally hit transient TLS-handshake
+    # timeouts (Portainer surfaces them as HTTP 500). Retry with backoff so a
+    # network blip doesn't red the pipeline.
+    pull = DOCKER + f"/images/create?fromImage=ghcr.io%2F{REPO.replace('/', '%2F')}&tag=latest"
+    for attempt in range(1, 5):
+        try:
+            req(pull, "POST", None, raw=True)
+            break
+        except urllib.error.HTTPError as e:
+            if attempt == 4:
+                raise
+            print(f"==> pull attempt {attempt} failed (HTTP {e.code}); retrying in {attempt * 10}s ...")
+            time.sleep(attempt * 10)
 
     imgs = req(DOCKER + "/images/json")
     newid = None
