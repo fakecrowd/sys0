@@ -12,6 +12,7 @@ import { Accounts } from "./components/Accounts";
 import { Setup } from "./components/Setup";
 import { Download } from "./components/Download";
 import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
+import { WindowManager, type WinApp } from "./WindowManager";
 
 export function App() {
   // Public agent-download page (works logged-out). No hooks above this gate
@@ -93,17 +94,9 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
   );
 }
 
-const TABS = [
-  ["shell", "Shell"], ["tasks", "任务"], ["proc", "进程"], ["files", "文件"],
-  ["monitor", "监控"], ["actions", "动作"], ["audit", "审计"], ["keys", "密钥"],
-  ["accounts", "账户"],
-] as const;
-type Tab = (typeof TABS)[number][0];
-
 function Console({ onLogout }: { onLogout: () => void }) {
   const [nodes, setNodes] = useState<Node[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [tab, setTab] = useState<Tab>("shell");
   const [live, setLive] = useState<Record<string, any>>({});
   const [navOpen, setNavOpen] = useState(false); // mobile node drawer
   const isAdmin = getRole() === "admin";
@@ -128,6 +121,22 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const targets = [...selected].filter((id) => nodes.some((n) => n.id === id));
   const primary = targets[0] || nodes[0]?.id || "";
 
+  // Each console surface is a window (desktop) / page (mobile). Admin-only
+  // surfaces are appended conditionally so non-admins never see them.
+  const apps: WinApp[] = [
+    { key: "shell", title: "Shell", render: () => <Shell nodes={nodes} primary={primary} /> },
+    { key: "tasks", title: "任务", render: () => <Tasks nodes={nodes} primary={primary} /> },
+    { key: "proc", title: "进程", render: () => <Processes nodes={nodes} primary={primary} /> },
+    { key: "files", title: "文件", render: () => <Files nodes={nodes} primary={primary} /> },
+    { key: "monitor", title: "监控", render: () => <Monitor targets={targets} live={live} /> },
+    { key: "actions", title: "动作", render: () => <Actions targets={targets} allCount={nodes.length} /> },
+    { key: "audit", title: "审计", render: () => <Audit /> },
+    ...(isAdmin ? [
+      { key: "keys", title: "密钥", render: () => <Keys /> },
+      { key: "accounts", title: "账户", render: () => <Accounts nodes={nodes} meName={getUser()} /> },
+    ] as WinApp[] : []),
+  ];
+
   return (
     <div className="h-full flex flex-col">
       <header className="flex items-center justify-between px-4 py-2.5 gap-2" style={{ borderBottom: "1px solid var(--border)" }}>
@@ -150,25 +159,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <NodeList nodes={nodes} selected={selected} toggle={toggle} live={live} onRefresh={refresh} />
         </div>
         <main className="flex-1 flex flex-col min-w-0">
-          <nav className="flex flex-wrap gap-1 px-3 pt-3">
-            {TABS.filter(([t]) => (t !== "keys" && t !== "accounts") || isAdmin).map(([t, label]) => (
-              <button key={t} onClick={() => setTab(t)} className="btn"
-                style={tab === t ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}}>
-                {label}
-              </button>
-            ))}
-          </nav>
-          <div className="flex-1 p-3 min-h-0 overflow-auto">
-            {tab === "shell" && <Shell nodes={nodes} primary={primary} />}
-            {tab === "tasks" && <Tasks nodes={nodes} primary={primary} />}
-            {tab === "proc" && <Processes nodes={nodes} primary={primary} />}
-            {tab === "files" && <Files nodes={nodes} primary={primary} />}
-            {tab === "monitor" && <Monitor targets={targets} live={live} />}
-            {tab === "actions" && <Actions targets={targets} allCount={nodes.length} />}
-            {tab === "audit" && <Audit />}
-            {tab === "keys" && isAdmin && <Keys />}
-            {tab === "accounts" && isAdmin && <Accounts nodes={nodes} meName={getUser()} />}
-          </div>
+          <WindowManager apps={apps} />
         </main>
       </div>
     </div>

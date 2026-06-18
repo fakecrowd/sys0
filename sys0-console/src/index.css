@@ -113,3 +113,140 @@ body {
   .btn { min-height: 32px; }
   .input { font-size: 16px; } /* prevents iOS zoom-on-focus */
 }
+
+/* ===================== window manager (desktop) ===================== */
+.wm-root {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.wm-canvas {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.035) 1px, transparent 0);
+  background-size: 22px 22px;
+}
+.wm-window {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  min-width: 340px;
+  min-height: 200px;
+  background: var(--panel, #0e1411);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+}
+.wm-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 12px;
+  cursor: move;
+  user-select: none;
+  background: rgba(255, 255, 255, 0.03);
+  border-bottom: 1px solid var(--border);
+}
+.wm-title-text {
+  font-size: 12px;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wm-controls { display: flex; align-items: center; gap: 4px; }
+.wm-btn {
+  width: 24px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.wm-btn:hover { background: rgba(255, 255, 255, 0.08); color: var(--fg, #d8e0dc); }
+.wm-btn.wm-close:hover { background: var(--danger); color: #fff; }
+.wm-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+.wm-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 50%, var(--border) 50%, var(--border) 60%, transparent 60%, transparent 72%, var(--border) 72%, var(--border) 82%, transparent 82%);
+}
+
+/* taskbar / launcher */
+.wm-taskbar {
+  flex-shrink: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+.wm-task {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.wm-task:hover { border-color: var(--accent); }
+.wm-task-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--border);
+}
+.wm-task.active { color: var(--accent); border-color: var(--accent); }
+.wm-task.active .wm-task-dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.wm-task.min { color: var(--muted); border-style: dashed; }
+.wm-task.min .wm-task-dot { background: var(--muted); }
+
+/* ===================== mobile: paged view ===================== */
+.wm-mobile {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+}
+.wm-mobile-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.wm-mobile-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}

@@ -1,14 +1,17 @@
 name: Deploy (prod)
 
-# Push to deploy/prod -> build the single hub image, push to GHCR, then
-# pull+recreate the sys0 container on jp09 via the Portainer-proxied Docker API.
+# GitOps deploy model:
+#   1. Build the single hub image (web console embedded) and push to GHCR.
+#   2. Trigger the Portainer stack webhook, which force-pulls the new :latest
+#      image and redeploys the git-managed `sys0` stack on jp09.
 #
-# NOTE: sys0 is a NON-git (raw compose) Portainer stack, so the old stack
-# webhook never repulls a new image when only the code (not the compose)
-# changes — it returned HTTP 404 because no webhook is configured on the stack
-# at all. The reliable path for "code changed, compose unchanged" is to pull
-# :latest and recreate the container directly. See skill sys0-agent-hub-dev /
-# references/portainer-api-workflow.md.
+# The `sys0` stack (Portainer id 135, endpoint 22) is a GIT REPOSITORY stack
+# backed by RockChinQ/server-deploy
+# (servers/jp-tyo-churros-09/sys0/docker-compose.yaml), with auto-update
+# webhook + forcePullImage enabled. Compose changes are picked up from git on
+# redeploy; image-only changes are pulled because the webhook forces a pull.
+# This replaces the old portainer_redeploy.py stop-then-recreate hack (which
+# could take the hub down on a slow GHCR pull).
 on:
   push:
     branches: [deploy/prod]
@@ -62,18 +65,28 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Pull + recreate sys0 container on jp09 (Portainer Docker API)
+      - name: Trigger Portainer GitOps redeploy (webhook, force-pull image)
         env:
-          PORTAINER_URL: https://portainer.rockchin.top
-          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-          ENDPOINT: "22"
-          CONTAINER: sys0
-          STACK: "133"
+          PORTAINER_WEBHOOK: ${{ secrets.PORTAINER_WEBHOOK }}
         run: |
-          if [ -z "$PORTAINER_API_KEY" ]; then
-            echo "::error::PORTAINER_API_KEY secret not set — image pushed but redeploy skipped."
+          if [ -z "$PORTAINER_WEBHOOK" ]; then
+            echo "::error::PORTAINER_WEBHOOK secret not set — image pushed but redeploy skipped."
             exit 1
           fi
-          python3 .github/scripts/portainer_redeploy.py
+          # The Portainer stack webhook force-pulls the new :latest and
+          # redeploys the git-managed sys0 stack. It returns 204 on success.
+          # Retry a few times: jp09->Portainer or Portainer->ghcr.io can hit a
+          # transient TLS-handshake timeout on the image pull.
+          ok=0
+          for i in 1 2 3 4 5; do
+            code=$(curl -sS -o /tmp/wh.out -w '%{http_code}' -X POST "$PORTAINER_WEBHOOK" || echo 000)
+            echo "==> webhook attempt $i -> HTTP $code"
+            if [ "$code" = "204" ] || [ "$code" = "200" ]; then ok=1; break; fi
+            cat /tmp/wh.out 2>/dev/null || true
+            sleep 10
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::Portainer webhook did not return 2xx after retries."
+            exit 1
+          fi
+          echo "==> redeploy triggered OK"
