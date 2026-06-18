@@ -22,8 +22,8 @@ export function App() {
 }
 
 function Login({ onAuthed }: { onAuthed: () => void }) {
-  const [u, setU] = useState("admin");
-  const [p, setP] = useState("admin");
+  const [u, setU] = useState("");
+  const [p, setP] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async (e: React.FormEvent) => {
@@ -44,9 +44,9 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
         </div>
         <p className="mono-sm mb-5">远程指令控制 · 中心控制台</p>
         <label className="mono-sm">USER</label>
-        <input className="input mt-1 mb-3" value={u} onChange={(e) => setU(e.target.value)} />
+        <input className="input mt-1 mb-3" value={u} autoComplete="off" placeholder="用户名 / username" onChange={(e) => setU(e.target.value)} />
         <label className="mono-sm">PASSWORD</label>
-        <input className="input mt-1 mb-4" type="password" value={p} onChange={(e) => setP(e.target.value)} />
+        <input className="input mt-1 mb-4" type="password" value={p} autoComplete="new-password" placeholder="密码 / password" onChange={(e) => setP(e.target.value)} />
         {err && <div className="mb-3" style={{ color: "var(--danger)" }}>{err}</div>}
         <button className="btn btn-accent w-full justify-center" disabled={busy}>
           {busy ? "..." : "登录 / LOGIN"}

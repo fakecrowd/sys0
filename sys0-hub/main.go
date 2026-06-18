@@ -16,15 +16,26 @@ import (
 // version is the build version (yyyyMMddhhmm), injected via -ldflags.
 var version = "dev"
 
+// envOr returns the value of env var key if set & non-empty, else fallback.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
 func main() {
 	cfg := HubConfig{}
-	var adminPass, jwtSecret string
-	flag.StringVar(&cfg.HTTP, "http", ":8080", "HTTP listen addr (console + API + ws agents)")
-	flag.StringVar(&cfg.AgentTCP, "agent-tcp", ":7000", "TCP listen addr for agents")
-	flag.StringVar(&cfg.AccessKey, "key", "devkey", "pre-shared agent access key")
-	flag.StringVar(&cfg.DBPath, "db", "sys0.db", "SQLite database path")
-	flag.StringVar(&adminPass, "admin-pass", "admin", "initial admin password")
-	flag.StringVar(&jwtSecret, "jwt-secret", "", "JWT signing secret (random if empty)")
+	var adminUser, adminPass, jwtSecret string
+	// Flags default to env vars (SYS0_*) so credentials can be set via
+	// environment; an explicit flag still overrides the env value.
+	flag.StringVar(&cfg.HTTP, "http", envOr("SYS0_HTTP", ":8080"), "HTTP listen addr (console + API + ws agents)")
+	flag.StringVar(&cfg.AgentTCP, "agent-tcp", envOr("SYS0_AGENT_TCP", ":7000"), "TCP listen addr for agents")
+	flag.StringVar(&cfg.AccessKey, "key", envOr("SYS0_AGENT_KEY", "devkey"), "pre-shared agent access key (env SYS0_AGENT_KEY)")
+	flag.StringVar(&cfg.DBPath, "db", envOr("SYS0_DB", "sys0.db"), "SQLite database path")
+	flag.StringVar(&adminUser, "admin-user", envOr("SYS0_ADMIN_USER", "admin"), "initial admin username (env SYS0_ADMIN_USER)")
+	flag.StringVar(&adminPass, "admin-pass", envOr("SYS0_ADMIN_PASS", "admin"), "initial admin password (env SYS0_ADMIN_PASS)")
+	flag.StringVar(&jwtSecret, "jwt-secret", envOr("SYS0_JWT_SECRET", ""), "JWT signing secret, random if empty (env SYS0_JWT_SECRET)")
 	flag.Parse()
 
 	if jwtSecret == "" {
@@ -41,7 +52,7 @@ func main() {
 		log.Error("init hub", "err", err)
 		os.Exit(1)
 	}
-	if err := hub.store.EnsureUser("admin", adminPass, "admin"); err != nil {
+	if err := hub.store.EnsureUser(adminUser, adminPass, "admin"); err != nil {
 		log.Error("seed admin", "err", err)
 		os.Exit(1)
 	}
@@ -64,7 +75,7 @@ func main() {
 	}()
 
 	log.Info("sys0-hub listening", "version", version, "http", cfg.HTTP, "agentTCP", cfg.AgentTCP)
-	log.Info("default login", "user", "admin", "pass", adminPass)
+	log.Info("admin account seeded", "user", adminUser)
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Error("http server", "err", err)
 		os.Exit(1)
