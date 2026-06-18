@@ -41,6 +41,32 @@ make build
 
 仅后端（无需 Node）：`go build -o bin/sys0-hub ./sys0-hub/`（仓库已包含构建好的 `sys0-hub/web`）。
 
+## 被控端数据目录与身份
+
+每个被控端在本地维护一个**数据目录**（`-data-dir`），里面放两个文件：
+
+| 文件 | 作用 |
+| --- | --- |
+| `sys0-agent.id` | 该机器的稳定身份指纹。首次启动时由 `crypto/rand` 生成 16 字节随机数（hex，权限 `0600`），之后每次启动复用。握手时上报给 Hub，Hub 据此把同一台机器认成同一个节点（节点 id 由指纹派生）。 |
+| `sys0-agent.lock` | 单实例文件锁。保证同一个 data-dir 同时只跑一个 agent，重复启动会直接退出。 |
+
+**默认目录**（未显式传 `-data-dir` 时，取 `os.UserConfigDir()` 下的 `sys0-agent/`）：
+
+| 平台 | 默认路径 |
+| --- | --- |
+| Linux | `$XDG_CONFIG_HOME/sys0-agent/`，未设则 `~/.config/sys0-agent/` |
+| macOS | `~/Library/Application Support/sys0-agent/` |
+| Windows | `%AppData%\sys0-agent\` |
+
+选这个位置是为了「双击零参数启动」也能稳定写入——工作目录可能只读或不确定。若连用户配置目录都无法解析，回退到当前目录 `.`。容器部署通常显式指定 `-data-dir`（例如挂一个持久卷），让身份随容器重建保留。
+
+运维提示：
+
+- **想让某台机器在 Hub 里重新登记** → 删掉它的 `sys0-agent.id`，下次启动会生成全新身份（旧节点变离线）。
+- **迁移 / 重装但要保留身份** → 备份并还原 `sys0-agent.id` 即可。
+- **不要把同一个 `sys0-agent.id` 复制到多台机器** → 会造成身份冲突，Hub 把它们当成同一个节点互相顶替。
+- 节点的**别名（label）和标签（tags）是运维侧管理字段**，在控制台里设置后由 Hub 持久化，不会被 agent 重连时上报的主机名覆盖。
+
 ## 测试
 
 ```bash
