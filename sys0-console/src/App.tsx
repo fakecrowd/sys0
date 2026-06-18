@@ -273,6 +273,9 @@ function NodeCard({
         <span className="mono-sm ml-auto">{n.id}</span>
       </div>
       <div className="mono-sm mt-1.5">{n.host.os}/{n.host.arch} · {n.host.ip || "—"}</div>
+      <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
+        agent {n.version || "—"}{n.rescue ? ` · rescue ${n.rescueVersion || "?"}` : ""}
+      </div>
       {m && !offline && (
         <div className="mono-sm mt-1">
           cpu {m.cpuPct?.toFixed?.(1)}% · mem {((m.memUsed / m.memTotal) * 100).toFixed(0)}% · load {m.load1}
