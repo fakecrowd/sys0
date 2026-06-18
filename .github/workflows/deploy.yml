@@ -70,6 +70,7 @@ jobs:
           PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
           ENDPOINT: "22"
           CONTAINER: sys0
+          STACK: "133"
         run: |
           if [ -z "$PORTAINER_API_KEY" ]; then
             echo "::error::PORTAINER_API_KEY secret not set — image pushed but redeploy skipped."

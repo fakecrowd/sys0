@@ -27,6 +27,7 @@ BASE = os.environ["PORTAINER_URL"].rstrip("/")
 APIKEY = os.environ["PORTAINER_API_KEY"]
 EP = os.environ.get("ENDPOINT", "22")
 NAME = os.environ.get("CONTAINER", "sys0")
+STACK = os.environ.get("STACK", "133")  # Portainer stack id (recreate fallback)
 REPO = os.environ.get("GITHUB_REPOSITORY", "fakecrowd/sys0")
 IMAGE = f"ghcr.io/{REPO}:latest"
 DOCKER = f"/api/endpoints/{EP}/docker"
@@ -38,7 +39,7 @@ def req(path, method="GET", body=None, raw=False):
     r.add_header("Content-Type", "application/json")
     r.add_header("X-API-Key", APIKEY)  # built at runtime; never a literal arg
     try:
-        resp = urllib.request.urlopen(r, timeout=120).read()
+        resp = urllib.request.urlopen(r, timeout=300).read()
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
         print(f"::error::Portainer {method} {path} -> HTTP {e.code}: {body[:300]}")
@@ -59,6 +60,20 @@ def find_sys0():
     return None
 
 
+def redeploy_stack():
+    """Recreate the sys0 container from its Portainer stack definition (used
+    when the container is missing -- e.g. a prior run removed it then timed
+    out). The named volume persists, so the DB/accounts survive."""
+    f = req(f"/api/stacks/{STACK}/file")
+    st = req(f"/api/stacks/{STACK}")
+    req(f"/api/stacks/{STACK}?endpointId={EP}", "PUT", {
+        "StackFileContent": f["StackFileContent"],
+        "Env": st.get("Env") or [],
+        "Prune": False,
+        "PullImage": True,
+    })
+
+
 def main():
     print(f"==> pulling {IMAGE} on endpoint {EP} ...")
     req(DOCKER + f"/images/create?fromImage=ghcr.io%2F{REPO.replace('/', '%2F')}&tag=latest",
@@ -76,8 +91,19 @@ def main():
 
     old = find_sys0()
     if old is None:
-        print(f"::error::no container matching '{NAME}' on endpoint {EP}")
-        sys.exit(1)
+        # A previous run may have removed the old container then timed out
+        # before recreating it (slow GHCR pull). The runtime config is gone,
+        # so clone-from-inspect is impossible -- redeploy the Portainer stack,
+        # which recreates it from the canonical compose. Self-heals reruns.
+        print(f"==> no '{NAME}' container on endpoint {EP}; redeploying stack {STACK} ...")
+        redeploy_stack()
+        time.sleep(3)
+        cur = find_sys0()
+        if not cur or cur["State"] != "running":
+            print(f"::error::stack redeploy did not bring up '{NAME}': {cur and cur.get('Status')}")
+            sys.exit(1)
+        print(f"==> sys0 is {cur['State']} ({cur['Status']}) via stack redeploy")
+        return
     print(f"    running ImageID: {old['ImageID'][:19]}")
     print(f"    latest  ImageID: {newid[:19]}")
 
