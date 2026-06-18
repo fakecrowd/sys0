@@ -247,7 +247,8 @@ fn resolveDataDir(gpa: std.mem.Allocator, env: *std.process.Environ.Map, explici
 // ---- arg parsing ----------------------------------------------------------
 fn parseArgs(gpa: std.mem.Allocator, env: *std.process.Environ.Map, args: std.process.Args, cfg: *Config) !Action {
     var action: Action = .run;
-    var it = std.process.Args.Iterator.init(args);
+    var it = try std.process.Args.Iterator.initAllocator(args, gpa);
+    defer it.deinit();
     _ = it.next(); // argv[0]
     while (it.next()) |arg| {
         if (std.mem.eql(u8, arg, "--hub")) {
