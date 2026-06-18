@@ -1,7 +1,8 @@
 # sys0-rescue
 
-A tiny, standalone supervisor/bootstrapper for `sys0-agent`, written in Zig for
-the smallest possible static binary (~0.5 MB, fully static, no libc dependency).
+A tiny, standalone supervisor/bootstrapper for `sys0-agent`, written in Zig
+(**0.16**) for the smallest possible static binary (~0.6 MB, fully static, no
+libc dependency).
 
 It is intentionally **independent of the agent and hub processes** so it can
 recover them even when they are broken.
@@ -30,10 +31,41 @@ recover them even when they are broken.
    re-downloads if it's gone missing or corrupt. A spawn failure (e.g. a corrupt
    executable) deletes the binary to force a clean re-fetch.
 
+4. **Autostart install** — `sys0-rescue install` registers *itself* to start on
+   boot/login. Because rescue supervises the agent, **registering rescue starts
+   both rescue and the agent automatically** — no competing autostart entries.
+
+## Boot autostart & privileges
+
+`install` **auto-detects privilege** and picks the right scope:
+
+| Platform | root / admin (system, starts before login) | unprivileged (**no admin**, starts at login) |
+|---|---|---|
+| Linux | systemd system unit `/etc/systemd/system/` | systemd **user** unit `~/.config/systemd/user/` + `loginctl enable-linger` (cron `@reboot` fallback if no systemd) |
+| macOS | LaunchDaemon `/Library/LaunchDaemons/` | LaunchAgent `~/Library/LaunchAgents/` |
+| Windows | (per-user path used by default) | `HKCU\…\Run` registry value |
+
+So: **system-wide boot autostart needs admin/root; per-user login autostart does
+not.** Run `install` with `sudo` (Linux/macOS) / an elevated prompt (Windows) for
+system scope, or as a normal user for per-user scope.
+
+```sh
+sudo ./sys0-rescue install      # system-wide, starts at boot
+./sys0-rescue install           # current user, starts at login (no admin)
+./sys0-rescue uninstall         # remove (matches the scope it detects)
+```
+
 ## Usage
 
 ```
-sys0-rescue [--hub HOST] [--data-dir DIR] [--once]
+sys0-rescue [COMMAND] [--hub HOST] [--data-dir DIR] [--once]
+
+commands:
+  (none)      run the supervisor (download + keepalive + rescue)
+  install     register autostart on boot/login
+  uninstall   remove the autostart registration
+
+options:
   --hub HOST       hub hostname (default sys0.facrd.xyz, env SYS0_HUB)
   --data-dir DIR   agent run dir (env SYS0_DATA_DIR; default per-user config dir)
   --once           bootstrap + spawn once, then exit (no supervision; for tests)
@@ -44,10 +76,10 @@ two share identity/lock files.
 
 ## Build
 
-Requires Zig 0.15.x.
+Requires **Zig 0.16.x**.
 
 ```sh
-make small      # x86_64-linux-musl, ReleaseSmall, stripped, static (~0.5 MB)
+make small      # x86_64-linux-musl, ReleaseSmall, stripped, static (~0.6 MB)
 make native     # host target
 make all        # cross-build the full sys0 matrix into dist/
 ```
@@ -61,4 +93,4 @@ no OpenSSL dependency.
 
 The agent/hub are Go (GC + runtime → ~2 MB binary floor). A deploy/daemon/rescue
 helper wants the opposite: minimal size, zero dynamic deps, fast cold start.
-Zig `ReleaseSmall` + static musl delivers ~0.5 MB with no libc dependency.
+Zig `ReleaseSmall` + static musl delivers ~0.6 MB with no libc dependency.

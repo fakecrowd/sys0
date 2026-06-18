@@ -1,10 +1,46 @@
 import { useEffect, useState } from "react";
-import { api, type ReleaseList } from "../api";
+import { api, type ReleaseList, type ReleaseAsset } from "../api";
 
 function human(n: number): string {
   if (n < 1024) return n + " B";
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
   return (n / 1024 / 1024).toFixed(1) + " MB";
+}
+
+function AssetTable({ title, empty, assets }: { title: string; empty: string; assets: ReleaseAsset[] }) {
+  return (
+    <div>
+      <div className="mono-sm mb-2" style={{ color: "var(--accent)" }}>{title}</div>
+      {assets.length === 0 ? (
+        <div className="panel p-4 mono-sm">{empty}</div>
+      ) : (
+        <table className="w-full" style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr className="mono-sm" style={{ textAlign: "left", opacity: 0.7 }}>
+              <th style={{ padding: "6px 8px" }}>平台 OS</th>
+              <th style={{ padding: "6px 8px" }}>架构 ARCH</th>
+              <th style={{ padding: "6px 8px" }}>文件 FILE</th>
+              <th style={{ padding: "6px 8px" }}>大小</th>
+              <th style={{ padding: "6px 8px" }}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {assets.map((a) => (
+              <tr key={a.name} style={{ borderTop: "1px solid var(--border)" }}>
+                <td className="mono-sm" style={{ padding: "8px" }}>{a.os || "\u2014"}</td>
+                <td className="mono-sm" style={{ padding: "8px" }}>{a.arch || "\u2014"}</td>
+                <td className="mono-sm" style={{ padding: "8px", wordBreak: "break-all" }}>{a.name}</td>
+                <td className="mono-sm" style={{ padding: "8px" }}>{human(a.size)}</td>
+                <td style={{ padding: "8px" }}>
+                  <a className="btn btn-accent" href={a.url}>下载</a>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
 }
 
 // Public agent-download page, served at /dl. Lists the sys0-agent binaries
@@ -41,34 +77,19 @@ export function Download() {
               {data.publishedAt && <> · {new Date(data.publishedAt).toLocaleString()}</>}
             </div>
 
-            {data.assets.length === 0 ? (
-              <div className="panel p-4 mono-sm">该 release 暂无 agent 可执行文件。</div>
-            ) : (
-              <table className="w-full" style={{ borderCollapse: "collapse" }}>
-                <thead>
-                  <tr className="mono-sm" style={{ textAlign: "left", opacity: 0.7 }}>
-                    <th style={{ padding: "6px 8px" }}>平台 OS</th>
-                    <th style={{ padding: "6px 8px" }}>架构 ARCH</th>
-                    <th style={{ padding: "6px 8px" }}>文件 FILE</th>
-                    <th style={{ padding: "6px 8px" }}>大小</th>
-                    <th style={{ padding: "6px 8px" }}></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {data.assets.map((a) => (
-                    <tr key={a.name} style={{ borderTop: "1px solid var(--border)" }}>
-                      <td className="mono-sm" style={{ padding: "8px" }}>{a.os || "—"}</td>
-                      <td className="mono-sm" style={{ padding: "8px" }}>{a.arch || "—"}</td>
-                      <td className="mono-sm" style={{ padding: "8px", wordBreak: "break-all" }}>{a.name}</td>
-                      <td className="mono-sm" style={{ padding: "8px" }}>{human(a.size)}</td>
-                      <td style={{ padding: "8px" }}>
-                        <a className="btn btn-accent" href={a.url}>下载</a>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+            <AssetTable
+              title="被控端 · sys0-agent"
+              empty="该 release 暂无 agent 可执行文件。"
+              assets={data.assets.filter((a) => a.kind !== "rescue")}
+            />
+
+            <div style={{ marginTop: 24 }}>
+              <AssetTable
+                title="守护/救援端 · sys0-rescue"
+                empty="该 release 暂无 rescue 可执行文件。"
+                assets={data.assets.filter((a) => a.kind === "rescue")}
+              />
+            </div>
 
             <div className="panel p-4 mt-6 mono-sm" style={{ lineHeight: 1.7 }}>
               <div style={{ color: "var(--accent)", marginBottom: 6 }}>开箱即用 · zero-config</div>
@@ -87,6 +108,11 @@ export function Download() {
               <div style={{ opacity: 0.6, marginTop: 10 }}>
                 自建 hub 可手动覆盖:{" "}
                 <code>./sys0-agent -hub &lt;host&gt; -transport wss -key &lt;ACCESS_KEY&gt; -label &lt;name&gt;</code>
+              </div>
+              <div style={{ opacity: 0.6, marginTop: 10 }}>
+                守护/开机自启:下载 <code>sys0-rescue</code> 后运行{" "}
+                <code>sys0-rescue install</code>{" "}
+                即自动下载并保活 agent、注册开机自启(有管理员=系统级,普通用户=登录级,无需 root)。
               </div>
             </div>
           </>

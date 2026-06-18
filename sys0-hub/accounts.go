@@ -295,23 +295,55 @@ func (h *Hub) apiAgentRedirect(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
+	url, ok := assetURLFor(payload, "agent", wantOS, wantArch)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no agent asset for " + wantOS + "/" + wantArch})
+		return
+	}
+	c.Redirect(http.StatusFound, url)
+}
+
+// apiRescueRedirect 302-redirects to the latest sys0-rescue binary matching
+// ?os=&arch=. Same contract as apiAgentRedirect. Public, no auth.
+func (h *Hub) apiRescueRedirect(c *gin.Context) {
+	wantOS := strings.ToLower(c.Query("os"))
+	wantArch := strings.ToLower(c.Query("arch"))
+	if wantOS == "" || wantArch == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "os and arch query params required"})
+		return
+	}
+	payload, err := cachedReleasePayload()
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	url, ok := assetURLFor(payload, "rescue", wantOS, wantArch)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no rescue asset for " + wantOS + "/" + wantArch})
+		return
+	}
+	c.Redirect(http.StatusFound, url)
+}
+
+// assetURLFor finds the download URL of the asset with the given kind/os/arch in
+// the compact release payload.
+func assetURLFor(payload []byte, kind, wantOS, wantArch string) (string, bool) {
 	var parsed struct {
 		OK     bool `json:"ok"`
 		Assets []struct {
 			URL  string `json:"url"`
 			OS   string `json:"os"`
 			Arch string `json:"arch"`
+			Kind string `json:"kind"`
 		} `json:"assets"`
 	}
 	if err := json.Unmarshal(payload, &parsed); err != nil || !parsed.OK {
-		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": "release list unavailable"})
-		return
+		return "", false
 	}
 	for _, a := range parsed.Assets {
-		if a.OS == wantOS && a.Arch == wantArch && a.URL != "" {
-			c.Redirect(http.StatusFound, a.URL)
-			return
+		if a.Kind == kind && a.OS == wantOS && a.Arch == wantArch && a.URL != "" {
+			return a.URL, true
 		}
 	}
-	c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no agent asset for " + wantOS + "/" + wantArch})
+	return "", false
 }

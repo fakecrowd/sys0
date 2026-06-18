@@ -50,8 +50,14 @@ func buildReleasePayload(raw []byte, hubVersion string) []byte {
 
 	assets := make([]any, 0, len(rel.Assets))
 	for _, a := range rel.Assets {
-		// only surface the agent binaries (skip the hub, checksums, etc.)
-		if !strings.Contains(a.Name, "agent") {
+		// surface the agent and rescue binaries (skip the hub, checksums, etc.)
+		kind := ""
+		switch {
+		case strings.Contains(a.Name, "sys0-rescue"):
+			kind = "rescue"
+		case strings.Contains(a.Name, "agent"):
+			kind = "agent"
+		default:
 			continue
 		}
 		osName, arch := parseTargetFromName(a.Name)
@@ -62,6 +68,7 @@ func buildReleasePayload(raw []byte, hubVersion string) []byte {
 			"downloadCount": a.DownloadCount,
 			"os":            osName,
 			"arch":          arch,
+			"kind":          kind,
 		})
 	}
 	out["assets"] = assets

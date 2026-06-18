@@ -143,7 +143,7 @@ export type User_ = {
 };
 
 export type ReleaseAsset = {
-  name: string; url: string; size: number; downloadCount: number; os: string; arch: string;
+  name: string; url: string; size: number; downloadCount: number; os: string; arch: string; kind?: string;
 };
 export type ReleaseList = {
   ok: boolean; error?: string; tag?: string; name?: string; releaseUrl?: string;
