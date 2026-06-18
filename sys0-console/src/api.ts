@@ -1,5 +1,17 @@
 // REST client for the sys0-hub API.
 
+export type RescueInfo = {
+  live: boolean;
+  version: string;
+  status: string; // phase: starting|downloading|starting-agent|supervising|restarting|error
+  detail: string;
+  restarts: number;
+  lastExit: number;
+  lastUptimeMs: number;
+  sinceSec: number; // continuous-reporting uptime
+  ageSec: number; // seconds since last report
+};
+
 export type Node = {
   id: string;
   label: string;
@@ -10,6 +22,7 @@ export type Node = {
   lastSeen: number;
   rescue?: boolean;
   rescueVersion?: string;
+  rescueInfo?: RescueInfo | null;
 };
 
 export type DispatchItem = {

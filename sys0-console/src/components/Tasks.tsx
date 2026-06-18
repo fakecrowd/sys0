@@ -118,8 +118,8 @@ export function Tasks({ nodes, primary }: { nodes: Node[]; primary: string }) {
   const current = tasks.find((t) => t.id === sel);
 
   return (
-    <div className="flex gap-3 h-full min-h-0">
-      <div className="w-[280px] flex flex-col gap-2 min-h-0">
+    <div className="task-split flex gap-3 h-full min-h-0">
+      <div className="task-aside w-[280px] flex flex-col gap-2 min-h-0">
         <select className="input" value={node} onChange={(e) => setNode(e.target.value)}>
           {nodes.filter((n) => n.state !== "offline").map((n) => <option key={n.id} value={n.id}>{n.label} · {n.id}</option>)}
         </select>

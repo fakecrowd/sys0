@@ -351,9 +351,17 @@ func assetURLFor(payload []byte, kind, wantOS, wantArch string) (string, bool) {
 // ---- rescue liveness (sys0-rescue -> hub binding) ----
 
 // rescueInfo records the last report from a node's supervising rescue process.
+// Beyond liveness it carries the rescue's self-reported phase/detail so the
+// console can show a live status view (downloading, supervising, restarting…).
 type rescueInfo struct {
-	version  string
-	lastSeen time.Time
+	version      string
+	status       string // phase: starting|downloading|starting-agent|supervising|restarting|error
+	detail       string // free-text detail (last log-worthy event)
+	restarts     int    // how many times the rescue has (re)started the agent
+	lastExit     int    // last agent exit code (-1 = none yet)
+	lastUptimeMs int64  // how long the agent ran last time
+	firstSeen    time.Time
+	lastSeen     time.Time
 }
 
 // rescueReports tracks, per node id, the most recent rescue report. A node is
@@ -365,29 +373,86 @@ var (
 
 const rescueTTL = 90 * time.Second
 
-// rescueStatus returns whether the node currently has a live rescue and its
-// reported version.
-func rescueStatus(nodeID string) (bool, string) {
+// rescueView is the live rescue status surfaced on a NodeView.
+type rescueView struct {
+	Live         bool   `json:"live"`
+	Version      string `json:"version"`
+	Status       string `json:"status"`
+	Detail       string `json:"detail"`
+	Restarts     int    `json:"restarts"`
+	LastExit     int    `json:"lastExit"`
+	LastUptimeMs int64  `json:"lastUptimeMs"`
+	SinceSec     int64  `json:"sinceSec"` // seconds the rescue has been continuously reporting
+	AgeSec       int64  `json:"ageSec"`   // seconds since the last report
+}
+
+// rescueStatus returns the live rescue status for a node (Live=false when no
+// fresh report exists within rescueTTL).
+func rescueStatus(nodeID string) rescueView {
 	rescueMu.Lock()
 	defer rescueMu.Unlock()
 	info, ok := rescueReports[nodeID]
 	if !ok || time.Since(info.lastSeen) > rescueTTL {
-		return false, ""
+		return rescueView{}
 	}
-	return true, info.version
+	return rescueView{
+		Live:         true,
+		Version:      info.version,
+		Status:       info.status,
+		Detail:       info.detail,
+		Restarts:     info.restarts,
+		LastExit:     info.lastExit,
+		LastUptimeMs: info.lastUptimeMs,
+		SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
+		AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
+	}
+}
+
+// liveRescueNodes returns the node ids that currently have a fresh rescue report
+// (within rescueTTL), each with its live status. Used to surface rescue-only
+// nodes — ones where the rescue is bootstrapping but the agent hasn't connected
+// yet — so operators can watch the download/start before the agent appears.
+func liveRescueNodes() map[string]rescueView {
+	rescueMu.Lock()
+	defer rescueMu.Unlock()
+	out := map[string]rescueView{}
+	for id, info := range rescueReports {
+		if time.Since(info.lastSeen) > rescueTTL {
+			continue
+		}
+		out[id] = rescueView{
+			Live:         true,
+			Version:      info.version,
+			Status:       info.status,
+			Detail:       info.detail,
+			Restarts:     info.restarts,
+			LastExit:     info.lastExit,
+			LastUptimeMs: info.lastUptimeMs,
+			SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
+			AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
+		}
+	}
+	return out
 }
 
 // apiRescueReport accepts a small JSON report from a sys0-rescue process. It is
 // authenticated by the same pre-shared agent key. The node id is derived from
 // the agent fingerprint exactly as UpsertNode does ("n" + fingerprint[:6]), so
 // the rescue binds to the same node the agent registers — no DB write needed.
+// The rescue reports from cold start (before the agent is even downloaded) and
+// continuously through every phase, so this can arrive with no live agent yet.
 func (h *Hub) apiRescueReport(c *gin.Context) {
 	var body struct {
-		Key         string `json:"key"`
-		Fingerprint string `json:"fingerprint"`
-		Version     string `json:"version"`
-		OS          string `json:"os"`
-		Arch        string `json:"arch"`
+		Key          string `json:"key"`
+		Fingerprint  string `json:"fingerprint"`
+		Version      string `json:"version"`
+		OS           string `json:"os"`
+		Arch         string `json:"arch"`
+		Status       string `json:"status"`
+		Detail       string `json:"detail"`
+		Restarts     int    `json:"restarts"`
+		LastExit     int    `json:"lastExit"`
+		LastUptimeMs int64  `json:"lastUptimeMs"`
 	}
 	if c.BindJSON(&body) != nil {
 		return
@@ -400,11 +465,36 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "invalid fingerprint"})
 		return
 	}
+	// Clamp free-text to keep the in-memory map bounded.
+	if len(body.Detail) > 240 {
+		body.Detail = body.Detail[:240]
+	}
+	if body.Status == "" {
+		body.Status = "supervising"
+	}
 	nodeID := "n" + body.Fingerprint[:6]
+	now := time.Now()
 	rescueMu.Lock()
-	rescueReports[nodeID] = rescueInfo{version: body.Version, lastSeen: time.Now()}
+	prev, existed := rescueReports[nodeID]
+	first := now
+	if existed && time.Since(prev.lastSeen) <= rescueTTL && !prev.firstSeen.IsZero() {
+		first = prev.firstSeen // preserve continuous-uptime origin
+	}
+	rescueReports[nodeID] = rescueInfo{
+		version:      body.Version,
+		status:       body.Status,
+		detail:       body.Detail,
+		restarts:     body.Restarts,
+		lastExit:     body.LastExit,
+		lastUptimeMs: body.LastUptimeMs,
+		firstSeen:    first,
+		lastSeen:     now,
+	}
 	rescueMu.Unlock()
-	// nudge consoles so the rescue badge appears without waiting for a refresh
-	h.reg.broadcast("node", "event.node", gin.H{"event": "rescue", "id": nodeID, "rescueVersion": body.Version})
+	// nudge consoles so the rescue badge/detail updates without a poll
+	h.reg.broadcast("node", "event.node", gin.H{
+		"event": "rescue", "id": nodeID,
+		"rescueVersion": body.Version, "status": body.Status, "detail": body.Detail,
+	})
 	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID})
 }

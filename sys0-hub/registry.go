@@ -37,6 +37,9 @@ type NodeView struct {
 	LastSeen      int64            `json:"lastSeen"`
 	Rescue        bool             `json:"rescue"`        // a sys0-rescue is supervising this node
 	RescueVersion string           `json:"rescueVersion"` // reported rescue build
+	// RescueInfo is the full live rescue status (phase/detail/restarts/…) for
+	// the console detail view; nil when no fresh rescue report exists.
+	RescueInfo *rescueView `json:"rescueInfo,omitempty"`
 }
 
 func (n *nodeSession) view() NodeView {
@@ -46,11 +49,16 @@ func (n *nodeSession) view() NodeView {
 	if tags == nil {
 		tags = []string{}
 	}
-	live, rv := rescueStatus(n.nodeID)
+	rs := rescueStatus(n.nodeID)
+	var ri *rescueView
+	if rs.Live {
+		v := rs
+		ri = &v
+	}
 	return NodeView{
 		ID: n.nodeID, Label: n.label, Tags: tags, Host: n.host,
 		Version: n.version, State: "online", LastSeen: n.lastSeen.Unix(),
-		Rescue: live, RescueVersion: rv,
+		Rescue: rs.Live, RescueVersion: rs.Version, RescueInfo: ri,
 	}
 }
 
@@ -60,12 +68,33 @@ func nodeViewFromRecord(r Node) NodeView {
 	if r.Tags != "" {
 		tags = strings.Split(r.Tags, ",")
 	}
-	live, rv := rescueStatus(r.ID)
+	rs := rescueStatus(r.ID)
+	var ri *rescueView
+	if rs.Live {
+		v := rs
+		ri = &v
+	}
 	return NodeView{
 		ID: r.ID, Label: r.Label, Tags: tags,
 		Host:    wire.HostSummary{Name: r.Label, OS: r.OS, Arch: r.Arch, Kernel: r.Kernel, IP: r.IP},
 		Version: r.AgentVersion, State: "offline", LastSeen: r.LastSeen,
-		Rescue: live, RescueVersion: rv,
+		Rescue: rs.Live, RescueVersion: rs.Version, RescueInfo: ri,
+	}
+}
+
+// nodeViewFromRescue builds a synthetic "bootstrapping" NodeView for a node that
+// has a live rescue report but no agent session/record yet — i.e. the rescue is
+// downloading/starting the agent. State is "bootstrapping" so the console can
+// distinguish it from online/offline.
+func nodeViewFromRescue(id string, rs rescueView) NodeView {
+	v := rs
+	return NodeView{
+		ID: id, Label: id, Tags: []string{},
+		Host:          wire.HostSummary{OS: "", Arch: ""},
+		State:         "bootstrapping",
+		Rescue:        true,
+		RescueVersion: rs.Version,
+		RescueInfo:    &v,
 	}
 }
 

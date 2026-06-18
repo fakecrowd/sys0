@@ -25,8 +25,8 @@ export function Setup({ onDone }: { onDone: () => void }) {
   };
 
   return (
-    <div className="h-full flex items-center justify-center">
-      <form onSubmit={submit} className="panel p-7 w-[360px]">
+    <div className="h-full flex items-center justify-center px-4">
+      <form onSubmit={submit} className="panel p-7 w-full max-w-[360px]">
         <div className="flex items-center gap-2 mb-1">
           <span className="dot" style={{ background: "var(--accent)" }} />
           <h1 className="text-lg" style={{ color: "var(--accent)" }}>sys0 · 初始化</h1>

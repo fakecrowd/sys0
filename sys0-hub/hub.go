@@ -94,7 +94,15 @@ func (h *Hub) ListNodes() []NodeView {
 	// include any online node not yet persisted (shouldn't happen, but be safe)
 	for _, s := range h.reg.listNodes() {
 		if !seen[s.nodeID] {
+			seen[s.nodeID] = true
 			out = append(out, s.view())
+		}
+	}
+	// include rescue-only nodes: a rescue reporting before its agent has
+	// connected (bootstrapping). Lets operators watch the download/start live.
+	for id, rs := range liveRescueNodes() {
+		if !seen[id] {
+			out = append(out, nodeViewFromRescue(id, rs))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })

@@ -72,6 +72,68 @@ pub const Config = struct {
 
 const Action = enum { run, install, uninstall, help };
 
+// ---- shared rescue status (reported to the hub) ---------------------------
+// The supervise loop writes Status; the reporter thread reads it. Single
+// writer + single reader, but we guard with a tiny mutex for safety on the
+// threaded Io backend. Phase describes what the rescue is currently doing so
+// the console can show a live detail view, not just "rescue: yes".
+const Phase = enum {
+    starting, // process just launched, nothing done yet
+    downloading, // fetching the agent binary from the hub
+    starting_agent, // spawning the agent child
+    supervising, // agent running, being kept alive
+    restarting, // agent died, backing off before relaunch
+    error_state, // cannot obtain/keep the agent
+
+    pub fn label(self: Phase) []const u8 {
+        return switch (self) {
+            .starting => "starting",
+            .downloading => "downloading",
+            .starting_agent => "starting-agent",
+            .supervising => "supervising",
+            .restarting => "restarting",
+            .error_state => "error",
+        };
+    }
+};
+
+const Status = struct {
+    mu: Io.Mutex = .init,
+    phase: Phase = .starting,
+    restarts: u32 = 0, // how many times the agent has been (re)started
+    last_exit: i64 = -1, // last agent exit code (-1 = none yet)
+    last_uptime_ms: u64 = 0, // how long the agent ran last time
+    detail_buf: [192]u8 = undefined,
+    detail_len: usize = 0, // free-text detail (last log-worthy event)
+
+    fn lock(self: *Status, io: Io) void {
+        self.mu.lockUncancelable(io);
+    }
+    fn unlock(self: *Status, io: Io) void {
+        self.mu.unlock(io);
+    }
+
+    // set updates phase + detail atomically. io required by Io.Mutex.
+    fn set(self: *Status, io: Io, phase: Phase, comptime fmt: []const u8, args: anytype) void {
+        self.lock(io);
+        defer self.unlock(io);
+        self.phase = phase;
+        const w = std.fmt.bufPrint(&self.detail_buf, fmt, args) catch {
+            self.detail_len = 0;
+            return;
+        };
+        self.detail_len = w.len;
+    }
+
+    fn detail(self: *Status) []const u8 {
+        return self.detail_buf[0..self.detail_len];
+    }
+};
+
+// Global status the reporter thread reads. Lives for the process lifetime.
+var g_status: Status = .{};
+
+
 // ---- logging --------------------------------------------------------------
 // On normal (console) builds we log to stderr. On Windows GUI-subsystem builds
 // (the /dl rescue, linked with --subsystem windows) there is NO console/stderr,
@@ -203,6 +265,48 @@ fn sleepMs(io: Io, ms: u64) void {
     Io.sleep(io, Io.Duration.fromMilliseconds(@intCast(ms)), .awake) catch {};
 }
 
+// ---- identity (shared with the agent) -------------------------------------
+// Generate (or load) the per-host fingerprint and persist it to sys0-agent.id
+// BEFORE downloading the agent. The agent's loadOrCreateID() reads this same
+// file if it exists, so the agent inherits this exact fingerprint — letting the
+// rescue announce itself to the hub (under the final node id) from cold start,
+// before the agent binary is even present. Returns the 32-char hex id.
+fn ensureFingerprint(io: Io, gpa: std.mem.Allocator, data_dir: []const u8) ![]u8 {
+    var id_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const id_path = try std.fmt.bufPrint(&id_path_buf, "{s}{c}sys0-agent.id", .{ data_dir, sep });
+
+    // Existing id wins (agent may have already created it).
+    if (readAgentFingerprint(io, gpa, id_path)) |fp| {
+        if (fp.len >= 8) return fp;
+        gpa.free(fp);
+    } else |_| {}
+
+    // Generate 16 random bytes -> 32 hex chars (same shape as the agent).
+    var raw: [16]u8 = undefined;
+    io.random(&raw);
+    const hex = std.fmt.bytesToHex(raw, .lower);
+    const id = try gpa.dupe(u8, &hex);
+    errdefer gpa.free(id);
+
+    // Persist atomically: write .tmp then rename, mode 0600 like the agent.
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}{c}sys0-agent.id.tmp", .{ data_dir, sep });
+    const cwd = Io.Dir.cwd();
+    {
+        var f = try cwd.createFile(io, tmp_path, .{ .truncate = true });
+        defer f.close(io);
+        var wbuf: [64]u8 = undefined;
+        var w = f.writer(io, &wbuf);
+        try w.interface.writeAll(&hex);
+        try w.interface.writeAll("\n");
+        try w.interface.flush();
+        if (builtin.os.tag != .windows) f.setPermissions(io, .fromMode(0o600)) catch {};
+    }
+    try cwd.rename(tmp_path, cwd, id_path, io);
+    logLine("generated agent fingerprint {s} (node n{s})", .{ id, id[0..6] });
+    return id;
+}
+
 // ---- hub reporting (rescue <-> hub binding) -------------------------------
 // Minimal hub link: once the supervised agent has produced its identity file
 // (sys0-agent.id — only created after the agent runs), the rescue POSTs a small
@@ -212,20 +316,19 @@ fn sleepMs(io: Io, ms: u64) void {
 // agent's pre-shared key and needs no WebSocket — basic functionality only.
 //
 // Runs on its own thread (io.concurrent) so it doesn't block the supervise loop.
-fn reportLoop(io: Io, gpa: std.mem.Allocator, cfg: Config) void {
-    var id_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const id_path = std.fmt.bufPrint(&id_path_buf, "{s}{c}sys0-agent.id", .{ cfg.data_dir, sep }) catch return;
-
+// The fingerprint is generated/loaded up front (ensureFingerprint) and passed
+// in, so the rescue reports to the hub from cold start — BEFORE the agent is
+// downloaded — and keeps reporting every report_every_s through every phase
+// (download, start, supervise, restart). Each report carries the live Status
+// so the console can show a detail view.
+fn reportLoop(io: Io, gpa: std.mem.Allocator, cfg: Config, fingerprint: []const u8) void {
+    // Report immediately so the node appears the instant the rescue starts,
+    // then on a fixed cadence for the process lifetime.
     while (true) {
-        sleepMs(io, cfg.report_every_s * 1000);
-        // Read the agent's fingerprint. Absent => agent hasn't run yet; skip
-        // this cycle (this is exactly the "after the agent connects" binding).
-        const fp = readAgentFingerprint(io, gpa, id_path) catch continue;
-        defer gpa.free(fp);
-        if (fp.len < 6) continue;
-        postReport(gpa, io, cfg, fp) catch |err| {
+        postReport(gpa, io, cfg, fingerprint) catch |err| {
             logLine("report failed: {s}", .{@errorName(err)});
         };
+        sleepMs(io, cfg.report_every_s * 1000);
     }
 }
 
@@ -247,14 +350,61 @@ fn readAgentFingerprint(io: Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 
     return trimmed;
 }
 
+// jsonEscape writes src into dst as a JSON-safe string (no surrounding quotes),
+// escaping the characters JSON requires (notably backslash, common in Windows
+// paths, and double-quote). Returns the written slice.
+fn jsonEscape(dst: []u8, src: []const u8) []const u8 {
+    var n: usize = 0;
+    for (src) |c| {
+        const esc: ?[]const u8 = switch (c) {
+            '"' => "\\\"",
+            '\\' => "\\\\",
+            '\n' => "\\n",
+            '\r' => "\\r",
+            '\t' => "\\t",
+            else => null,
+        };
+        if (esc) |e| {
+            if (n + e.len > dst.len) break;
+            @memcpy(dst[n .. n + e.len], e);
+            n += e.len;
+        } else if (c < 0x20) {
+            // control char -> skip (keep payload compact)
+            continue;
+        } else {
+            if (n + 1 > dst.len) break;
+            dst[n] = c;
+            n += 1;
+        }
+    }
+    return dst[0..n];
+}
+
 fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const u8) !void {
     var url_buf: [256]u8 = undefined;
     const url = try std.fmt.bufPrint(&url_buf, "https://{s}/api/v1/rescue/report", .{cfg.hub});
 
-    var body_buf: [512]u8 = undefined;
+    // Snapshot the live status under lock.
+    g_status.lock(io);
+    const phase = g_status.phase;
+    const restarts = g_status.restarts;
+    const last_exit = g_status.last_exit;
+    const last_uptime_ms = g_status.last_uptime_ms;
+    var detail_raw_buf: [192]u8 = undefined;
+    const detail_raw = blk: {
+        const d = g_status.detail();
+        @memcpy(detail_raw_buf[0..d.len], d);
+        break :blk detail_raw_buf[0..d.len];
+    };
+    g_status.unlock(io);
+
+    var detail_buf: [384]u8 = undefined;
+    const detail = jsonEscape(&detail_buf, detail_raw);
+
+    var body_buf: [1024]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf,
-        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}"}}
-    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name });
+        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","restarts":{d},"lastExit":{d},"lastUptimeMs":{d}}}
+    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, restarts, last_exit, last_uptime_ms });
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -279,13 +429,20 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
 
     while (true) {
         // RESCUE: re-validate (and re-download) before every (re)start.
+        // Mark "downloading" only when the binary is actually absent/invalid so
+        // the console shows the bootstrap phase (the common cold-start case).
+        if (!agentLooksValid(io, agent_path)) {
+            g_status.set(io, .downloading, "fetching agent from {s}", .{cfg.hub});
+        }
         ensureAgent(gpa, io, cfg, agent_path) catch |err| {
+            g_status.set(io, .error_state, "cannot obtain agent: {s}", .{@errorName(err)});
             logLine("cannot obtain agent ({s}); retrying in {d}ms", .{ @errorName(err), backoff });
             sleepMs(io, backoff);
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
             continue;
         };
 
+        g_status.set(io, .starting_agent, "spawning agent", .{});
         logLine("starting agent: {s} --data-dir {s}", .{ agent_path, cfg.data_dir });
 
         const start_ts = Io.Timestamp.now(io, .awake);
@@ -296,6 +453,7 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
             .stdout = .inherit,
             .stderr = .inherit,
         }) catch |err| {
+            g_status.set(io, .error_state, "spawn failed: {s}", .{@errorName(err)});
             logLine("spawn failed: {s}", .{@errorName(err)});
             // corrupt binary? force re-download
             Io.Dir.cwd().deleteFile(io, agent_path) catch {};
@@ -303,6 +461,14 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
             continue;
         };
+
+        // Agent is up. Count the (re)start and flip to the supervising phase.
+        g_status.lock(io);
+        g_status.restarts += 1;
+        g_status.phase = .supervising;
+        const detail = std.fmt.bufPrint(&g_status.detail_buf, "agent running (pid-tracked)", .{}) catch "";
+        g_status.detail_len = detail.len;
+        g_status.unlock(io);
 
         if (cfg.once) {
             logLine("--once: agent spawned, exiting supervisor", .{});
@@ -319,10 +485,17 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         const now_ts = Io.Timestamp.now(io, .awake);
         const uptime_ms: u64 = @intCast(@max(0, start_ts.durationTo(now_ts).toMilliseconds()));
 
+        var exit_code: i64 = -1;
         switch (term) {
-            .exited => |code| logLine("agent exited code={d} after {d}ms", .{ code, uptime_ms }),
-            .signal => |s| logLine("agent killed by signal={d} after {d}ms", .{ @intFromEnum(s), uptime_ms }),
-            .stopped => |s| logLine("agent stopped signal={d}", .{@intFromEnum(s)}),
+            .exited => |code| {
+                exit_code = code;
+                logLine("agent exited code={d} after {d}ms", .{ code, uptime_ms });
+            },
+            .signal => |sg| {
+                exit_code = -@as(i64, @intFromEnum(sg));
+                logLine("agent killed by signal={d} after {d}ms", .{ @intFromEnum(sg), uptime_ms });
+            },
+            .stopped => |sg| logLine("agent stopped signal={d}", .{@intFromEnum(sg)}),
             .unknown => |u| logLine("agent ended unknown={d}", .{u}),
         }
 
@@ -331,6 +504,16 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         } else {
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
         }
+
+        // Record the exit for the console detail view, then announce the
+        // restart backoff phase.
+        g_status.lock(io);
+        g_status.last_exit = exit_code;
+        g_status.last_uptime_ms = uptime_ms;
+        g_status.phase = .restarting;
+        const rd = std.fmt.bufPrint(&g_status.detail_buf, "agent exited ({d}) after {d}ms; restart in {d}ms", .{ exit_code, uptime_ms, backoff }) catch "";
+        g_status.detail_len = rd.len;
+        g_status.unlock(io);
 
         logLine("restarting agent in {d}ms", .{backoff});
         sleepMs(io, backoff);
@@ -451,11 +634,30 @@ pub fn main(init: std.process.Init) !void {
 
     logLine("starting · hub={s} os={s} arch={s} data_dir={s}", .{ cfg.hub, os_name, arch_name, cfg.data_dir });
 
-    // Start the hub-reporting thread (rescue<->agent binding). Detached: it
-    // loops for the process lifetime. Best-effort — if concurrency is somehow
-    // unavailable, the supervisor still runs without hub reporting.
-    if (!cfg.once) {
-        _ = io.concurrent(reportLoop, .{ io, gpa, cfg }) catch |err| {
+    // CONNECT FIRST: generate/load the agent fingerprint and announce to the hub
+    // BEFORE downloading anything. The agent inherits this exact fingerprint
+    // (loadOrCreateID reads the file), so the rescue reports under the final node
+    // id from cold start and the operator can watch the bootstrap live.
+    const fingerprint = ensureFingerprint(io, gpa, cfg.data_dir) catch |err| blk: {
+        logLine("fingerprint unavailable ({s}); reporting disabled", .{@errorName(err)});
+        break :blk &[_]u8{};
+    };
+
+    g_status.set(io, .starting, "rescue online; preparing agent", .{});
+
+    // Synchronous initial report so the node appears the instant the rescue
+    // starts — before the (potentially slow) first download. Best-effort.
+    if (!cfg.once and fingerprint.len >= 6) {
+        postReport(gpa, io, cfg, fingerprint) catch |err| {
+            logLine("initial report failed: {s}", .{@errorName(err)});
+        };
+    }
+
+    // Start the continuous hub-reporting thread (rescue<->agent binding).
+    // Detached: it loops for the process lifetime, re-reporting the live Status
+    // through every phase (download/start/supervise/restart). Best-effort.
+    if (!cfg.once and fingerprint.len >= 6) {
+        _ = io.concurrent(reportLoop, .{ io, gpa, cfg, fingerprint }) catch |err| {
             logLine("hub reporter unavailable: {s}", .{@errorName(err)});
         };
     }

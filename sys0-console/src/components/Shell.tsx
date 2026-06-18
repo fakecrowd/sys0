@@ -174,7 +174,7 @@ export function Shell({ nodes, primary }: { nodes: Node[]; primary: string }) {
 
   return (
     <div className="flex flex-col gap-2 h-full">
-      <div className="flex gap-2 items-center">
+      <div className="flex gap-2 items-center flex-wrap">
         <span className="mono-sm">交互 Shell（agent 侧常驻 · 可复用/多开）·</span>
         <select className="input" style={{ width: 200 }} value={node}
           onChange={(e) => { const next = e.target.value; setNode(next); if (connected && next !== st.current.node) switchNode(next); }}>

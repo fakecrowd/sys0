@@ -16,7 +16,7 @@ export function Monitor({ targets, live }: { targets: string[]; live: Record<str
         <button className="btn btn-accent" disabled={busy || !targets.length} onClick={() => watch(true)}>开启</button>
         <button className="btn" disabled={busy || !targets.length} onClick={() => watch(false)}>停止</button>
       </div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {targets.map((id) => {
           const m = live[id];
           return (

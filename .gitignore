@@ -11,3 +11,5 @@ sys0-console/tsconfig.tsbuildinfo
 
 # go
 /vendor/
+/sys0-hub/sys0-hub
+/sys0-agent/sys0-agent

@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, type Node } from "./api";
+import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, type Node, type RescueInfo } from "./api";
 import { Shell } from "./components/Shell";
 import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
@@ -64,8 +64,8 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
     } catch { setErr("network error"); } finally { setBusy(false); }
   };
   return (
-    <div className="h-full flex items-center justify-center">
-      <form onSubmit={submit} className="panel p-7 w-[340px]">
+    <div className="h-full flex items-center justify-center px-4">
+      <form onSubmit={submit} className="panel p-7 w-full max-w-[340px]">
         <div className="flex items-center gap-2 mb-1">
           <span className="dot" style={{ background: "var(--accent)" }} />
           <h1 className="text-lg" style={{ color: "var(--accent)" }}>sys0</h1>
@@ -96,6 +96,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<Tab>("shell");
   const [live, setLive] = useState<Record<string, any>>({});
+  const [navOpen, setNavOpen] = useState(false); // mobile node drawer
   const isAdmin = getRole() === "admin";
 
   const refresh = useCallback(async () => {
@@ -120,20 +121,25 @@ function Console({ onLogout }: { onLogout: () => void }) {
 
   return (
     <div className="h-full flex flex-col">
-      <header className="flex items-center justify-between px-4 py-2.5" style={{ borderBottom: "1px solid var(--border)" }}>
-        <div className="flex items-center gap-2">
+      <header className="flex items-center justify-between px-4 py-2.5 gap-2" style={{ borderBottom: "1px solid var(--border)" }}>
+        <div className="flex items-center gap-2 min-w-0">
+          <button className="btn nav-toggle" style={{ padding: "2px 9px" }} aria-label="节点列表"
+            onClick={() => setNavOpen((o) => !o)}>☰</button>
           <span className="dot" style={{ background: "var(--accent)", boxShadow: "0 0 8px var(--accent)" }} />
           <span style={{ color: "var(--accent)" }}>sys0</span>
-          <span className="mono-sm">/ console</span>
+          <span className="mono-sm hide-sm">/ console</span>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="mono-sm">{nodes.length} online · {targets.length} selected · {getRole()}</span>
+        <div className="flex items-center gap-3 min-w-0">
+          <span className="mono-sm truncate">{nodes.length} online · {targets.length} sel · {getRole()}</span>
           <button className="btn" onClick={onLogout}>退出</button>
         </div>
       </header>
 
-      <div className="flex-1 flex min-h-0">
-        <NodeList nodes={nodes} selected={selected} toggle={toggle} live={live} onRefresh={refresh} />
+      <div className="flex-1 flex min-h-0 relative">
+        {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} />}
+        <div className={navOpen ? "node-drawer open" : "node-drawer"}>
+          <NodeList nodes={nodes} selected={selected} toggle={toggle} live={live} onRefresh={refresh} />
+        </div>
         <main className="flex-1 flex flex-col min-w-0">
           <nav className="flex flex-wrap gap-1 px-3 pt-3">
             {TABS.filter(([t]) => (t !== "keys" && t !== "accounts") || isAdmin).map(([t, label]) => (
@@ -206,7 +212,7 @@ function NodeList({
   const ordered = sortNodes(nodes, live, sort.field, sort.dir);
 
   return (
-    <aside className="w-[300px] flex flex-col" style={{ borderRight: "1px solid var(--border)" }}>
+    <aside className="w-full h-full flex flex-col" style={{ borderRight: "1px solid var(--border)" }}>
       <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
         <span className="mono-sm">NODES · 工作集</span>
         <button className="btn" onClick={onRefresh}>↻</button>
@@ -237,6 +243,7 @@ function NodeCard({
 }: { n: Node; on: boolean; toggle: (id: string) => void; m: any; onChanged: () => void }) {
   const [open, setOpen] = useState(false);
   const [info, setInfo] = useState<any>(null);
+  const [rescueOpen, setRescueOpen] = useState(n.state === "bootstrapping");
 
   const act = async (label: string, danger: boolean, fn: () => Promise<any>) => {
     if (!(await confirmDialog(`${label} @ ${n.label}（${n.id}）?`, { title: label, danger }))) return;
@@ -258,17 +265,24 @@ function NodeCard({
   };
 
   const offline = n.state === "offline";
+  const bootstrapping = n.state === "bootstrapping";
+  const selectable = !offline && !bootstrapping;
 
   return (
     <div className="panel p-2.5" style={{ ...(on ? { borderColor: "var(--accent)" } : {}), ...(offline ? { opacity: 0.55 } : {}) }}>
-      <div className={offline ? "flex items-center gap-2" : "flex items-center gap-2 cursor-pointer"}
-        onClick={() => !offline && toggle(n.id)}>
-        <span className="dot" style={{ background: offline ? "var(--muted)" : "var(--accent)" }} />
+      <div className={selectable ? "flex items-center gap-2 cursor-pointer" : "flex items-center gap-2"}
+        onClick={() => selectable && toggle(n.id)}>
+        <span className="dot" style={{ background: offline ? "var(--muted)" : bootstrapping ? "var(--warn)" : "var(--accent)" }} />
         <span style={{ color: on ? "var(--accent)" : "var(--fg)" }}>{n.label}</span>
         {offline && <span className="tag" style={{ color: "var(--muted)" }}>offline</span>}
+        {bootstrapping && <span className="tag" style={{ color: "var(--warn)", borderColor: "var(--warn)" }}>引导中</span>}
         {n.rescue && (
-          <span className="tag" title={`sys0-rescue 守护中${n.rescueVersion ? " · " + n.rescueVersion : ""}`}
-            style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>rescue</span>
+          <span className="tag cursor-pointer"
+            title="点击查看 rescue 守护详情"
+            onClick={(e) => { e.stopPropagation(); setRescueOpen((o) => !o); }}
+            style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>
+            rescue {rescueOpen ? "▾" : "▸"}
+          </span>
         )}
         <span className="mono-sm ml-auto">{n.id}</span>
       </div>
@@ -276,6 +290,7 @@ function NodeCard({
       <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
         agent {n.version || "—"}{n.rescue ? ` · rescue ${n.rescueVersion || "?"}` : ""}
       </div>
+      {n.rescue && rescueOpen && <RescueDetail r={n.rescueInfo} fallbackVer={n.rescueVersion} />}
       {m && !offline && (
         <div className="mono-sm mt-1">
           cpu {m.cpuPct?.toFixed?.(1)}% · mem {((m.memUsed / m.memTotal) * 100).toFixed(0)}% · load {m.load1}
@@ -306,6 +321,53 @@ function NodeCard({
             `host ${info.hostname}\nkernel ${info.kernel}\ncpu ${info.cpuModel} x${info.cpuCount}\nmem ${(info.memTotal / 1e9).toFixed(1)}G\nup ${(info.uptimeSec / 3600).toFixed(1)}h`}
         </pre>
       )}
+    </div>
+  );
+}
+
+const RESCUE_PHASES: Record<string, { label: string; color: string }> = {
+  starting: { label: "启动中", color: "var(--accent-2)" },
+  downloading: { label: "下载 agent", color: "var(--warn)" },
+  "starting-agent": { label: "拉起 agent", color: "var(--accent-2)" },
+  supervising: { label: "守护中", color: "var(--accent)" },
+  restarting: { label: "重启中", color: "var(--warn)" },
+  error: { label: "异常", color: "var(--danger)" },
+};
+
+function fmtDur(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m${sec % 60}s`;
+  return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`;
+}
+
+function RescueDetail({ r, fallbackVer }: { r?: RescueInfo | null; fallbackVer?: string }) {
+  // r may be absent if the node view predates the richer payload; show a
+  // minimal card from whatever we have.
+  const phase = r?.status || "supervising";
+  const ph = RESCUE_PHASES[phase] || { label: phase, color: "var(--muted)" };
+  const rows: [string, string][] = [];
+  rows.push(["阶段", ph.label]);
+  if (r?.detail) rows.push(["详情", r.detail]);
+  rows.push(["版本", r?.version || fallbackVer || "—"]);
+  if (r) {
+    rows.push(["重启次数", String(r.restarts)]);
+    if (r.lastExit >= 0 || r.lastUptimeMs > 0)
+      rows.push(["上次退出", `code=${r.lastExit}${r.lastUptimeMs ? ` · 存活 ${fmtDur(Math.round(r.lastUptimeMs / 1000))}` : ""}`]);
+    rows.push(["守护时长", fmtDur(r.sinceSec)]);
+    rows.push(["最近上报", `${r.ageSec}s 前`]);
+  }
+  return (
+    <div className="mono-sm mt-1.5 p-2" style={{ background: "#0b1013", border: "1px solid var(--border)", borderRadius: 6 }}>
+      <div className="flex items-center gap-2 mb-1">
+        <span className="dot" style={{ background: ph.color }} />
+        <span style={{ color: ph.color }}>sys0-rescue · {ph.label}</span>
+      </div>
+      {rows.map(([k, v]) => (
+        <div key={k} className="flex gap-2" style={{ lineHeight: 1.5 }}>
+          <span style={{ color: "var(--muted)", minWidth: 56, flexShrink: 0 }}>{k}</span>
+          <span style={{ wordBreak: "break-all" }}>{v}</span>
+        </div>
+      ))}
     </div>
   );
 }
