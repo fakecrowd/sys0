@@ -140,9 +140,15 @@ func randHexS(n int) string {
 
 // ---- nodes ----
 
-// UpsertNode registers or updates a node by fingerprint and returns its id and
-// whether this is the first time the node was seen (isNew).
-func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, version string) (id string, isNew bool, err error) {
+// UpsertNode registers or updates a node by fingerprint and returns its id,
+// whether this is the first time the node was seen (isNew), and the effective
+// label/tags after the upsert.
+//
+// Label and tags are operator-managed (set from the console) and MUST survive
+// agent reconnects: the agent's self-reported label only seeds a brand-new
+// node (or backfills an empty label). Host facts (OS/arch/kernel/ip/version)
+// are refreshed from the agent on every connect.
+func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, version string) (id string, isNew bool, effLabel, effTags string, err error) {
 	now := time.Now().Unix()
 	var n Node
 	e := s.db.Where("fingerprint = ?", fp).First(&n).Error
@@ -150,9 +156,13 @@ func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, versio
 		n = Node{ID: "n" + fp[:6], Fingerprint: fp, FirstSeen: now}
 		isNew = true
 	} else if e != nil {
-		return "", false, e
+		return "", false, "", "", e
 	}
-	n.Label = label
+	// Only seed the label from the agent for a new node or when no operator
+	// label has ever been set; never clobber an operator-assigned alias.
+	if isNew || n.Label == "" {
+		n.Label = label
+	}
 	n.LastAddr = addr
 	n.OS = host.OS
 	n.Arch = host.Arch
@@ -162,9 +172,9 @@ func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, versio
 	n.State = "online"
 	n.LastSeen = now
 	if err := s.db.Clauses(clause.OnConflict{UpdateAll: true}).Save(&n).Error; err != nil {
-		return "", false, err
+		return "", false, "", "", err
 	}
-	return n.ID, isNew, nil
+	return n.ID, isNew, n.Label, n.Tags, nil
 }
 
 func (s *Store) SetNodeState(id, state string) error {

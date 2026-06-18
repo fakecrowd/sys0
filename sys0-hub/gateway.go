@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/fakecrowd/sys0/internal/rpc"
@@ -61,9 +62,13 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 		return nil, rpc.Errorf(rpc.CodeBadParams, "invalid fingerprint")
 	}
 
-	id, isNew, err := n.hub.store.UpsertNode(hello.Fingerprint, hello.Label, n.conn.RemoteAddr(), hello.Host, hello.AgentVersion)
+	id, isNew, effLabel, effTags, err := n.hub.store.UpsertNode(hello.Fingerprint, hello.Label, n.conn.RemoteAddr(), hello.Host, hello.AgentVersion)
 	if err != nil {
 		return nil, rpc.Errorf(rpc.CodeInternal, "register: %v", err)
+	}
+	tags := []string{}
+	if effTags != "" {
+		tags = strings.Split(effTags, ",")
 	}
 	// On first join, grant access to the users configured in the
 	// "new-node default access" policy (admins always see every node).
@@ -75,7 +80,8 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 
 	n.mu.Lock()
 	n.nodeID = id
-	n.label = hello.Label
+	n.label = effLabel
+	n.tags = tags
 	n.host = hello.Host
 	n.version = hello.AgentVersion
 	n.lastSeen = time.Now()
@@ -85,9 +91,9 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 		old.peer.Close() // displace a stale duplicate
 	}
 
-	n.hub.log.Info("node online", "nodeId", id, "label", hello.Label, "addr", n.conn.RemoteAddr())
+	n.hub.log.Info("node online", "nodeId", id, "label", effLabel, "addr", n.conn.RemoteAddr())
 	n.hub.reg.broadcast("node", "event.node", map[string]any{"event": "online", "node": n.view()})
-	n.hub.auditNode(id, "node.online", hello.Label, n.conn.RemoteAddr())
+	n.hub.auditNode(id, "node.online", effLabel, n.conn.RemoteAddr())
 
 	return wire.Welcome{NodeID: id, Heartbeat: 15}, nil
 }

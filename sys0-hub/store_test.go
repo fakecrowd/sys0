@@ -136,3 +136,69 @@ func TestSettingsKV(t *testing.T) {
 		t.Fatalf("upsert = %q", v)
 	}
 }
+
+func TestUpsertNodePreservesOperatorLabelTags(t *testing.T) {
+	s := newTestStore(t)
+	fp := "abcdef0123456789"
+	host := wire.HostSummary{OS: "linux", Arch: "amd64", Kernel: "6.1", IP: "10.0.0.2"}
+
+	// First connect: agent self-reports its hostname as the label.
+	id, isNew, label, tags, err := s.UpsertNode(fp, "raw-hostname", "1.2.3.4:5", host, "v1")
+	if err != nil || !isNew {
+		t.Fatalf("first upsert: id=%q isNew=%v err=%v", id, isNew, err)
+	}
+	if label != "raw-hostname" || tags != "" {
+		t.Fatalf("new node should seed agent label: label=%q tags=%q", label, tags)
+	}
+
+	// Operator renames the node and adds tags from the console.
+	if err := s.SetNodeLabelTags(id, "prod-db-01", "db,critical"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent reconnects, still self-reporting the raw hostname. The operator's
+	// label/tags MUST survive; only host facts/version refresh.
+	_, isNew2, label2, tags2, err := s.UpsertNode(fp, "raw-hostname", "1.2.3.4:6",
+		wire.HostSummary{OS: "linux", Arch: "amd64", Kernel: "6.5", IP: "10.0.0.9"}, "v2")
+	if err != nil || isNew2 {
+		t.Fatalf("reconnect upsert: isNew=%v err=%v", isNew2, err)
+	}
+	if label2 != "prod-db-01" {
+		t.Fatalf("operator label clobbered on reconnect: got %q", label2)
+	}
+	if tags2 != "db,critical" {
+		t.Fatalf("operator tags clobbered on reconnect: got %q", tags2)
+	}
+
+	// Confirm the persisted record reflects preserved label/tags + refreshed host.
+	recs, err := s.ListNodeRecords()
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("records=%d err=%v", len(recs), err)
+	}
+	r := recs[0]
+	if r.Label != "prod-db-01" || r.Tags != "db,critical" {
+		t.Fatalf("persisted label/tags = %q / %q", r.Label, r.Tags)
+	}
+	if r.Kernel != "6.5" || r.IP != "10.0.0.9" || r.AgentVersion != "v2" {
+		t.Fatalf("host facts not refreshed: %+v", r)
+	}
+}
+
+func TestUpsertNodeBackfillsEmptyLabel(t *testing.T) {
+	s := newTestStore(t)
+	fp := "fedcba9876543210"
+	// New node connects with an empty label (agent couldn't resolve hostname).
+	id, _, label, _, err := s.UpsertNode(fp, "", "a:1", wire.HostSummary{}, "v1")
+	if err != nil || label != "" {
+		t.Fatalf("first: label=%q err=%v", label, err)
+	}
+	// Later it reports a real label; with no operator label set, backfill it.
+	_, _, label2, _, err := s.UpsertNode(fp, "node-7", "a:2", wire.HostSummary{}, "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if label2 != "node-7" {
+		t.Fatalf("empty label should backfill from agent: got %q", label2)
+	}
+	_ = id
+}
