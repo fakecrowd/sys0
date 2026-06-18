@@ -190,3 +190,17 @@ func (l *WSListener) Accept() (Conn, error) {
 	}
 	return c, nil
 }
+
+// upgrader for one-shot upgrades (UpgradeWS) that bypass the listener/Accept
+// channel, letting the caller bind per-connection context (e.g. an auth actor).
+var oneShotUpgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+
+// UpgradeWS upgrades a single HTTP request to a WebSocket Conn and returns it
+// directly, so the caller can associate it with request-scoped state.
+func UpgradeWS(w http.ResponseWriter, r *http.Request) (Conn, error) {
+	c, err := oneShotUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return nil, err
+	}
+	return newWSConn(c), nil
+}

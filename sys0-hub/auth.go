@@ -69,18 +69,30 @@ func (h *Hub) actorFromRequest(r *http.Request) (Actor, bool) {
 	// API key path
 	if strings.HasPrefix(tok, "sk_") {
 		if rec, ok := h.store.AuthKey(tok); ok {
+			scope := splitScope(rec.NodeScope)
 			return Actor{
 				Kind: "key", ID: rec.ID, Role: rec.Role,
-				NodeScope:      splitScope(rec.NodeScope),
+				ScopeAll:       len(scope) == 0, // unrestricted key = all nodes
+				NodeScope:      scope,
 				MethodScope:    splitScope(rec.MethodScope),
 				AllowDangerous: rec.AllowDangerous,
 			}, true
 		}
 		return Actor{}, false
 	}
-	// JWT path (full access for the demo's user roles)
+	// JWT path — resolve the live user so role/scope changes take effect.
 	if c, ok := h.verifyToken(tok); ok {
-		return Actor{Kind: "user", ID: c.Sub, Role: c.Role, AllowDangerous: true}, true
+		u, found := h.store.GetUser(c.Sub)
+		if !found {
+			return Actor{}, false // user deleted since token issued
+		}
+		isAdmin := u.Role == "admin"
+		return Actor{
+			Kind: "user", ID: u.Username, Role: u.Role,
+			ScopeAll:       isAdmin,        // admins see every node
+			NodeScope:      u.NodeScope,    // members restricted to their list
+			AllowDangerous: isAdmin,        // only admins may run dangerous methods
+		}, true
 	}
 	return Actor{}, false
 }

@@ -29,7 +29,7 @@ go build -o bin/sys0-agent ./sys0-agent/
 
 echo "== start hub =="
 rm -f "$DB"
-./bin/sys0-hub -http ":${HTTP_PORT}" -agent-tcp ":${TCP_PORT}" -key "$KEY" -db "$DB" \
+SYS0_ADMIN_USER=admin SYS0_ADMIN_PASS=admin ./bin/sys0-hub -http ":${HTTP_PORT}" -agent-tcp ":${TCP_PORT}" -key "$KEY" -db "$DB" \
   -jwt-secret e2esecret >/tmp/sys0_e2e_hub.log 2>&1 &
 PIDS+=($!)
 sleep 1

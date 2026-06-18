@@ -89,9 +89,16 @@ jobs:
             tar czf "$dist.tar.gz" "$dist"
             echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
           fi
+          # Also publish a STANDALONE agent binary so the hub's /dl page can
+          # offer a direct download per platform (name carries os/arch).
+          agent_asset="sys0-agent_${VERSION}_${GOOS}_${GOARCH}${ext}"
+          cp "$dist/sys0-agent$ext" "$agent_asset"
+          echo "AGENT_ASSET=$agent_asset" >> "$GITHUB_ENV"
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
-        run: gh release upload "$VERSION" "$ASSET" --clobber
+        run: |
+          gh release upload "$VERSION" "$ASSET" --clobber
+          gh release upload "$VERSION" "$AGENT_ASSET" --clobber

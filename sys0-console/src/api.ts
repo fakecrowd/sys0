@@ -28,16 +28,20 @@ export type MethodSpec = {
 
 const TOKEN_KEY = "sys0_token";
 const ROLE_KEY = "sys0_role";
+const USER_KEY = "sys0_user";
 
 export const getToken = () => localStorage.getItem(TOKEN_KEY);
-export const getRole = () => localStorage.getItem(ROLE_KEY) || "operator";
-export function setSession(t: string, role: string) {
+export const getRole = () => localStorage.getItem(ROLE_KEY) || "member";
+export const getUser = () => localStorage.getItem(USER_KEY) || "";
+export function setSession(t: string, role: string, username?: string) {
   localStorage.setItem(TOKEN_KEY, t);
   localStorage.setItem(ROLE_KEY, role);
+  if (username !== undefined) localStorage.setItem(USER_KEY, username);
 }
 export function clearSession() {
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
+  localStorage.removeItem(USER_KEY);
 }
 
 async function req<T>(method: string, path: string, body?: any): Promise<T> {
@@ -62,7 +66,7 @@ export type Select = { nodes?: string[]; tags?: string[]; all?: boolean };
 
 export const api = {
   login: (username: string, password: string) =>
-    req<{ ok: boolean; token?: string; role?: string; error?: string }>(
+    req<{ ok: boolean; token?: string; role?: string; username?: string; error?: string }>(
       "POST",
       "/api/v1/auth/login",
       { username, password }
@@ -96,6 +100,54 @@ export const api = {
   keyCreate: (body: any) =>
     req<{ ok: boolean; key?: string; id?: string; error?: string }>("POST", "/api/v1/keys", body),
   keyRevoke: (id: string) => req<{ ok: boolean }>("DELETE", "/api/v1/keys/" + id),
+
+  // --- first-run setup ---
+  setupStatus: () => req<{ ok: boolean; needsSetup: boolean }>("GET", "/api/v1/setup/status"),
+  setup: (username: string, password: string) =>
+    req<{ ok: boolean; token?: string; role?: string; username?: string; error?: string }>(
+      "POST", "/api/v1/setup", { username, password }),
+
+  // --- current user ---
+  me: () => req<{ ok: boolean; user: User_ }>("GET", "/api/v1/me"),
+  changeOwnPassword: (oldPassword: string, newPassword: string) =>
+    req<{ ok: boolean; error?: string }>("POST", "/api/v1/me/password", { oldPassword, newPassword }),
+
+  // --- user management (admin) ---
+  usersList: () => req<{ ok: boolean; users: User_[] }>("GET", "/api/v1/users"),
+  userCreate: (body: { username: string; password: string; role: string; nodeScope: string[] }) =>
+    req<{ ok: boolean; user?: User_; error?: string }>("POST", "/api/v1/users", body),
+  userSetScope: (id: number, nodeScope: string[]) =>
+    req<{ ok: boolean; error?: string }>("POST", `/api/v1/users/${id}/scope`, { nodeScope }),
+  userSetRole: (id: number, role: string) =>
+    req<{ ok: boolean; error?: string }>("POST", `/api/v1/users/${id}/role`, { role }),
+  userSetPassword: (id: number, password: string) =>
+    req<{ ok: boolean; error?: string }>("POST", `/api/v1/users/${id}/password`, { password }),
+  userDelete: (id: number) =>
+    req<{ ok: boolean; error?: string }>("DELETE", `/api/v1/users/${id}`),
+
+  // --- new-node default access policy (admin) ---
+  getDefaultAccess: () => req<{ ok: boolean; users: string[] }>("GET", "/api/v1/settings/default-access"),
+  setDefaultAccess: (users: string[]) =>
+    req<{ ok: boolean; error?: string }>("POST", "/api/v1/settings/default-access", { users }),
+
+  // --- agent downloads (/dl) ---
+  releases: () => req<ReleaseList>("GET", "/api/v1/releases"),
+};
+
+export type User_ = {
+  id: number;
+  username: string;
+  role: string; // admin | member
+  nodeScope: string[];
+  createdAt: number;
+};
+
+export type ReleaseAsset = {
+  name: string; url: string; size: number; downloadCount: number; os: string; arch: string;
+};
+export type ReleaseList = {
+  ok: boolean; error?: string; tag?: string; name?: string; releaseUrl?: string;
+  publishedAt?: string; hubVersion?: string; assets: ReleaseAsset[];
 };
 
 // SSE stream of live node/metrics events.

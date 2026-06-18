@@ -61,9 +61,16 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 		return nil, rpc.Errorf(rpc.CodeBadParams, "invalid fingerprint")
 	}
 
-	id, err := n.hub.store.UpsertNode(hello.Fingerprint, hello.Label, n.conn.RemoteAddr(), hello.Host, hello.AgentVersion)
+	id, isNew, err := n.hub.store.UpsertNode(hello.Fingerprint, hello.Label, n.conn.RemoteAddr(), hello.Host, hello.AgentVersion)
 	if err != nil {
 		return nil, rpc.Errorf(rpc.CodeInternal, "register: %v", err)
+	}
+	// On first join, grant access to the users configured in the
+	// "new-node default access" policy (admins always see every node).
+	if isNew {
+		if csv := n.hub.store.GetSetting("default_node_users", ""); csv != "" {
+			n.hub.store.GrantNodeToUsers(id, splitScope(csv))
+		}
 	}
 
 	n.mu.Lock()

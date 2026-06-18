@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { api, getToken, getRole, setSession, clearSession, eventStream, type Node } from "./api";
+import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, type Node } from "./api";
 import { Shell } from "./components/Shell";
 import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
@@ -8,14 +8,42 @@ import { Monitor } from "./components/Monitor";
 import { Actions } from "./components/Actions";
 import { Audit } from "./components/Audit";
 import { Keys } from "./components/Keys";
+import { Accounts } from "./components/Accounts";
+import { Setup } from "./components/Setup";
+import { Download } from "./components/Download";
 import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
 
 export function App() {
+  // Public agent-download page (works logged-out). No hooks above this gate
+  // run conditionally because AppRoot's hooks live in a separate component.
+  if (location.pathname === "/dl" || location.pathname === "/dl/") {
+    return (<><Download /><Dialogs /></>);
+  }
+  return <AppRoot />;
+}
+
+function AppRoot() {
   const [authed, setAuthed] = useState(!!getToken());
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    if (authed) return;
+    api.setupStatus().then((r) => setNeedsSetup(r.ok ? r.needsSetup : false)).catch(() => setNeedsSetup(false));
+  }, [authed]);
+
+  let body: React.ReactNode;
+  if (authed) {
+    body = <Console onLogout={() => { clearSession(); setAuthed(false); }} />;
+  } else if (needsSetup === null) {
+    body = <div className="h-full flex items-center justify-center mono-sm">…</div>;
+  } else if (needsSetup) {
+    body = <Setup onDone={() => { setNeedsSetup(false); setAuthed(true); }} />;
+  } else {
+    body = <Login onAuthed={() => setAuthed(true)} />;
+  }
   return (
     <>
-      {!authed ? <Login onAuthed={() => setAuthed(true)} />
-        : <Console onLogout={() => { clearSession(); setAuthed(false); }} />}
+      {body}
       <Dialogs />
     </>
   );
@@ -31,7 +59,7 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
     setBusy(true); setErr("");
     try {
       const r = await api.login(u, p);
-      if (r.ok && r.token) { setSession(r.token, r.role || "operator"); onAuthed(); }
+      if (r.ok && r.token) { setSession(r.token, r.role || "member", r.username || u); onAuthed(); }
       else setErr(r.error || "login failed");
     } catch { setErr("network error"); } finally { setBusy(false); }
   };
@@ -59,6 +87,7 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
 const TABS = [
   ["shell", "Shell"], ["tasks", "任务"], ["proc", "进程"], ["files", "文件"],
   ["monitor", "监控"], ["actions", "动作"], ["audit", "审计"], ["keys", "密钥"],
+  ["accounts", "账户"],
 ] as const;
 type Tab = (typeof TABS)[number][0];
 
@@ -107,7 +136,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         <NodeList nodes={nodes} selected={selected} toggle={toggle} live={live} onRefresh={refresh} />
         <main className="flex-1 flex flex-col min-w-0">
           <nav className="flex flex-wrap gap-1 px-3 pt-3">
-            {TABS.filter(([t]) => t !== "keys" || isAdmin).map(([t, label]) => (
+            {TABS.filter(([t]) => (t !== "keys" && t !== "accounts") || isAdmin).map(([t, label]) => (
               <button key={t} onClick={() => setTab(t)} className="btn"
                 style={tab === t ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}}>
                 {label}
@@ -123,6 +152,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
             {tab === "actions" && <Actions targets={targets} allCount={nodes.length} />}
             {tab === "audit" && <Audit />}
             {tab === "keys" && isAdmin && <Keys />}
+            {tab === "accounts" && isAdmin && <Accounts nodes={nodes} meName={getUser()} />}
           </div>
         </main>
       </div>

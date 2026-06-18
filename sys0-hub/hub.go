@@ -37,13 +37,14 @@ type Actor struct {
 	Kind           string // user | key
 	ID             string
 	Role           string
-	NodeScope      []string // empty = all
+	ScopeAll       bool     // true = may access every node (admins, unrestricted keys)
+	NodeScope      []string // explicit allow-list (used when ScopeAll is false)
 	MethodScope    []string // empty = all
 	AllowDangerous bool
 }
 
 func (a Actor) nodeAllowed(id string) bool {
-	if len(a.NodeScope) == 0 {
+	if a.ScopeAll {
 		return true
 	}
 	for _, n := range a.NodeScope {
@@ -100,6 +101,22 @@ func (h *Hub) ListNodes() []NodeView {
 	return out
 }
 
+// ListNodesFor returns the fleet visible to a given actor (admins/ScopeAll see
+// all; members see only nodes in their allow-list).
+func (h *Hub) ListNodesFor(actor Actor) []NodeView {
+	all := h.ListNodes()
+	if actor.ScopeAll {
+		return all
+	}
+	out := make([]NodeView, 0, len(all))
+	for _, v := range all {
+		if actor.nodeAllowed(v.ID) {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
 // resolve turns a Select into target node sessions plus offline error items.
 func (h *Hub) resolve(sel wire.Select, actor Actor) (targets []*nodeSession, offline []wire.DispatchItem) {
 	switch {
@@ -124,8 +141,8 @@ func (h *Hub) resolve(sel wire.Select, actor Actor) (targets []*nodeSession, off
 	case sel.All:
 		targets = h.reg.listNodes()
 	}
-	// apply node scope
-	if len(actor.NodeScope) > 0 {
+	// apply node scope (members are restricted to their allow-list)
+	if !actor.ScopeAll {
 		filtered := targets[:0]
 		for _, s := range targets {
 			if actor.nodeAllowed(s.nodeID) {

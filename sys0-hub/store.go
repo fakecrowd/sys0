@@ -38,8 +38,15 @@ type User struct {
 	ID         uint   `gorm:"primaryKey"`
 	Username   string `gorm:"uniqueIndex"`
 	SecretHash string
-	Role       string
+	Role       string // admin | member
+	NodeScope  string // comma-separated node ids a member may access (admin = all)
 	CreatedAt  int64
+}
+
+// Setting is a simple key/value store for hub-wide configuration.
+type Setting struct {
+	Key   string `gorm:"primaryKey"`
+	Value string
 }
 
 type APIKey struct {
@@ -95,7 +102,7 @@ func OpenStore(path string) (*Store, error) {
 	if sqlDB, err := db.DB(); err == nil {
 		sqlDB.SetMaxOpenConns(1) // serialize writes for sqlite
 	}
-	if err := db.AutoMigrate(&Node{}, &User{}, &APIKey{}, &Audit{}, &Sample{}); err != nil {
+	if err := db.AutoMigrate(&Node{}, &User{}, &Setting{}, &APIKey{}, &Audit{}, &Sample{}); err != nil {
 		return nil, err
 	}
 	return &Store{db: db}, nil
@@ -133,15 +140,17 @@ func randHexS(n int) string {
 
 // ---- nodes ----
 
-// UpsertNode registers or updates a node by fingerprint and returns its id.
-func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, version string) (string, error) {
+// UpsertNode registers or updates a node by fingerprint and returns its id and
+// whether this is the first time the node was seen (isNew).
+func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, version string) (id string, isNew bool, err error) {
 	now := time.Now().Unix()
 	var n Node
-	err := s.db.Where("fingerprint = ?", fp).First(&n).Error
-	if errors.Is(err, gorm.ErrRecordNotFound) {
+	e := s.db.Where("fingerprint = ?", fp).First(&n).Error
+	if errors.Is(e, gorm.ErrRecordNotFound) {
 		n = Node{ID: "n" + fp[:6], Fingerprint: fp, FirstSeen: now}
-	} else if err != nil {
-		return "", err
+		isNew = true
+	} else if e != nil {
+		return "", false, e
 	}
 	n.Label = label
 	n.LastAddr = addr
@@ -153,9 +162,9 @@ func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, versio
 	n.State = "online"
 	n.LastSeen = now
 	if err := s.db.Clauses(clause.OnConflict{UpdateAll: true}).Save(&n).Error; err != nil {
-		return "", err
+		return "", false, err
 	}
-	return n.ID, nil
+	return n.ID, isNew, nil
 }
 
 func (s *Store) SetNodeState(id, state string) error {
@@ -182,6 +191,48 @@ func (s *Store) DeleteNode(id string) error {
 
 // ---- users ----
 
+// UserRecord is the API-facing view of a user (no secret hash).
+type UserRecord struct {
+	ID        uint     `json:"id"`
+	Username  string   `json:"username"`
+	Role      string   `json:"role"`
+	NodeScope []string `json:"nodeScope"`
+	CreatedAt int64    `json:"createdAt"`
+}
+
+func userView(u User) UserRecord {
+	return UserRecord{
+		ID: u.ID, Username: u.Username, Role: u.Role,
+		NodeScope: splitScope(u.NodeScope), CreatedAt: u.CreatedAt,
+	}
+}
+
+// CountUsers returns how many users exist (0 => first-run setup needed).
+func (s *Store) CountUsers() int64 {
+	var n int64
+	s.db.Model(&User{}).Count(&n)
+	return n
+}
+
+// CreateUser inserts a new user. role must be "admin" or "member".
+func (s *Store) CreateUser(username, secret, role string, nodeScope []string) (UserRecord, error) {
+	if role != "admin" {
+		role = "member"
+	}
+	u := User{
+		Username:   username,
+		SecretHash: hashSecret(secret),
+		Role:       role,
+		NodeScope:  strings.Join(nodeScope, ","),
+		CreatedAt:  time.Now().Unix(),
+	}
+	if err := s.db.Create(&u).Error; err != nil {
+		return UserRecord{}, err
+	}
+	return userView(u), nil
+}
+
+// EnsureUser creates the user only if it does not already exist (seed helper).
 func (s *Store) EnsureUser(username, secret, role string) error {
 	var count int64
 	s.db.Model(&User{}).Where("username = ?", username).Count(&count)
@@ -191,12 +242,116 @@ func (s *Store) EnsureUser(username, secret, role string) error {
 	return s.db.Create(&User{Username: username, SecretHash: hashSecret(secret), Role: role, CreatedAt: time.Now().Unix()}).Error
 }
 
-func (s *Store) AuthUser(username, secret string) (role string, ok bool) {
+// AuthUser verifies credentials and returns the full user record.
+func (s *Store) AuthUser(username, secret string) (UserRecord, bool) {
 	var u User
 	if err := s.db.Where("username = ?", username).First(&u).Error; err != nil {
-		return "", false
+		return UserRecord{}, false
 	}
-	return u.Role, verifySecret(secret, u.SecretHash)
+	if !verifySecret(secret, u.SecretHash) {
+		return UserRecord{}, false
+	}
+	return userView(u), true
+}
+
+// GetUser fetches a user record by username.
+func (s *Store) GetUser(username string) (UserRecord, bool) {
+	var u User
+	if err := s.db.Where("username = ?", username).First(&u).Error; err != nil {
+		return UserRecord{}, false
+	}
+	return userView(u), true
+}
+
+// GetUserByID fetches a user record by primary key.
+func (s *Store) GetUserByID(id uint) (UserRecord, bool) {
+	var u User
+	if err := s.db.Where("id = ?", id).First(&u).Error; err != nil {
+		return UserRecord{}, false
+	}
+	return userView(u), true
+}
+
+func (s *Store) ListUsers() ([]UserRecord, error) {
+	var users []User
+	if err := s.db.Order("id").Find(&users).Error; err != nil {
+		return nil, err
+	}
+	out := make([]UserRecord, 0, len(users))
+	for _, u := range users {
+		out = append(out, userView(u))
+	}
+	return out, nil
+}
+
+// UpdateUserScope sets the node scope (host access list) for a user.
+func (s *Store) UpdateUserScope(id uint, nodeScope []string) error {
+	return s.db.Model(&User{}).Where("id = ?", id).Update("node_scope", strings.Join(nodeScope, ",")).Error
+}
+
+// UpdateUserRole sets a user's role (admin|member).
+func (s *Store) UpdateUserRole(id uint, role string) error {
+	if role != "admin" {
+		role = "member"
+	}
+	return s.db.Model(&User{}).Where("id = ?", id).Update("role", role).Error
+}
+
+// SetUserPassword updates a user's password hash.
+func (s *Store) SetUserPassword(id uint, secret string) error {
+	return s.db.Model(&User{}).Where("id = ?", id).Update("secret_hash", hashSecret(secret)).Error
+}
+
+func (s *Store) DeleteUser(id uint) error {
+	return s.db.Where("id = ?", id).Delete(&User{}).Error
+}
+
+// CountAdmins returns the number of admin users (guard against deleting the last one).
+func (s *Store) CountAdmins() int64 {
+	var n int64
+	s.db.Model(&User{}).Where("role = ?", "admin").Count(&n)
+	return n
+}
+
+// GrantNodeToUsers appends nodeID to the NodeScope of the given usernames
+// (used when a new node joins, per the default-access policy).
+func (s *Store) GrantNodeToUsers(nodeID string, usernames []string) {
+	for _, name := range usernames {
+		var u User
+		if err := s.db.Where("username = ?", name).First(&u).Error; err != nil {
+			continue
+		}
+		if u.Role == "admin" {
+			continue // admins already see everything
+		}
+		scope := splitScope(u.NodeScope)
+		already := false
+		for _, n := range scope {
+			if n == nodeID {
+				already = true
+				break
+			}
+		}
+		if already {
+			continue
+		}
+		scope = append(scope, nodeID)
+		s.db.Model(&User{}).Where("id = ?", u.ID).Update("node_scope", strings.Join(scope, ","))
+	}
+}
+
+// ---- settings ----
+
+func (s *Store) GetSetting(key, fallback string) string {
+	var st Setting
+	if err := s.db.Where("key = ?", key).First(&st).Error; err != nil {
+		return fallback
+	}
+	return st.Value
+}
+
+func (s *Store) SetSetting(key, value string) error {
+	return s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&Setting{Key: key, Value: value}).Error
 }
 
 // ---- api keys ----

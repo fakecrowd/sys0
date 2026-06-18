@@ -34,22 +34,31 @@ func (h *Hub) Router() http.Handler {
 	r.GET("/agent", func(c *gin.Context) { agentWS.Handler(c.Writer, c.Request) })
 
 	// --- console WebSocket (auth required) ---
-	consoleWS := transport.NewWSListener()
-	go acceptLoop(consoleWS, h.serveConsole)
 	r.GET("/ws", func(c *gin.Context) {
-		if _, ok := h.actorFromRequest(c.Request); !ok {
+		actor, ok := h.actorFromRequest(c.Request)
+		if !ok {
 			c.String(http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		consoleWS.Handler(c.Writer, c.Request)
+		conn, err := transport.UpgradeWS(c.Writer, c.Request)
+		if err != nil {
+			return
+		}
+		// bind the authenticated actor to this console session
+		go h.serveConsole(conn, actor)
 	})
 
 	// --- REST API v1 ---
 	v1 := r.Group("/api/v1")
 	v1.POST("/auth/login", h.apiLogin)
 	v1.GET("/methods", h.apiMethods)
+	v1.GET("/setup/status", h.apiSetupStatus)
+	v1.POST("/setup", h.apiSetup)
+	v1.GET("/releases", h.apiReleases) // public: agent download list (/dl page)
 
 	auth := v1.Group("", h.authMW())
+	auth.GET("/me", h.apiMe)
+	auth.POST("/me/password", h.apiChangeOwnPassword)
 	auth.GET("/nodes", h.apiNodes)
 	auth.GET("/nodes/:id", h.apiNode)
 	auth.POST("/nodes/:id/label", h.apiNodeLabel)
@@ -64,6 +73,14 @@ func (h *Hub) Router() http.Handler {
 	admin.GET("/keys", h.apiListKeys)
 	admin.POST("/keys", h.apiCreateKey)
 	admin.DELETE("/keys/:id", h.apiRevokeKey)
+	admin.GET("/users", h.apiListUsers)
+	admin.POST("/users", h.apiCreateUser)
+	admin.POST("/users/:id/scope", h.apiUserScope)
+	admin.POST("/users/:id/role", h.apiUserRole)
+	admin.POST("/users/:id/password", h.apiUserPassword)
+	admin.DELETE("/users/:id", h.apiDeleteUser)
+	admin.GET("/settings/default-access", h.apiGetDefaultAccess)
+	admin.POST("/settings/default-access", h.apiSetDefaultAccess)
 
 	// --- MCP (reuse the net/http handler) ---
 	r.Any("/mcp", gin.WrapF(h.mcpHandler))
@@ -136,13 +153,13 @@ func (h *Hub) apiLogin(c *gin.Context) {
 	if c.BindJSON(&body) != nil {
 		return
 	}
-	role, ok := h.store.AuthUser(body.Username, body.Password)
+	u, ok := h.store.AuthUser(body.Username, body.Password)
 	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "error": "invalid credentials"})
 		return
 	}
-	tok := h.signToken(body.Username, role, 12*time.Hour)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "token": tok, "role": role, "username": body.Username})
+	tok := h.signToken(u.Username, u.Role, 12*time.Hour)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "token": tok, "role": u.Role, "username": u.Username})
 }
 
 func (h *Hub) apiMethods(c *gin.Context) {
@@ -150,10 +167,14 @@ func (h *Hub) apiMethods(c *gin.Context) {
 }
 
 func (h *Hub) apiNodes(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"ok": true, "nodes": h.ListNodes()})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "nodes": h.ListNodesFor(actorOf(c))})
 }
 
 func (h *Hub) apiNode(c *gin.Context) {
+	if !actorOf(c).nodeAllowed(c.Param("id")) {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
+		return
+	}
 	s := h.reg.get(c.Param("id"))
 	if s == nil {
 		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "node not found or offline"})
@@ -163,6 +184,10 @@ func (h *Hub) apiNode(c *gin.Context) {
 }
 
 func (h *Hub) apiNodeLabel(c *gin.Context) {
+	if !actorOf(c).nodeAllowed(c.Param("id")) {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
+		return
+	}
 	var body struct {
 		Label string   `json:"label"`
 		Tags  []string `json:"tags"`
@@ -187,6 +212,10 @@ func (h *Hub) apiNodeLabel(c *gin.Context) {
 }
 
 func (h *Hub) apiNodeDetach(c *gin.Context) {
+	if !actorOf(c).nodeAllowed(c.Param("id")) {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
+		return
+	}
 	if s := h.reg.get(c.Param("id")); s != nil {
 		s.peer.Close()
 	}
@@ -195,6 +224,10 @@ func (h *Hub) apiNodeDetach(c *gin.Context) {
 
 func (h *Hub) apiNodeDelete(c *gin.Context) {
 	id := c.Param("id")
+	if !actorOf(c).nodeAllowed(id) {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
+		return
+	}
 	if s := h.reg.get(id); s != nil {
 		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "node online; detach first"})
 		return
@@ -345,9 +378,8 @@ func (h *Hub) serveStatic(c *gin.Context) {
 
 // --- console WS handler (JSON-RPC over the persistent connection) ---
 
-func (h *Hub) serveConsole(conn transport.Conn) {
+func (h *Hub) serveConsole(conn transport.Conn, actor Actor) {
 	sess := &consoleSession{topics: map[string]bool{}}
-	actor := Actor{Kind: "user", ID: "console", Role: "admin", AllowDangerous: true}
 	sess.peer = rpc.NewPeer(conn, h.consoleHandler(sess, actor), nil)
 	h.reg.addConsole(sess)
 	defer h.reg.removeConsole(sess)
@@ -364,12 +396,15 @@ func (h *Hub) consoleHandler(sess *consoleSession, actor Actor) rpc.Handler {
 			}
 			return h.Dispatch(ctx, actor, p)
 		case "hub.nodes":
-			return map[string]any{"nodes": h.ListNodes()}, nil
+			return map[string]any{"nodes": h.ListNodesFor(actor)}, nil
 		case "hub.node":
 			var p struct {
 				Node string `json:"node"`
 			}
 			json.Unmarshal(params, &p)
+			if !actor.nodeAllowed(p.Node) {
+				return nil, rpc.Errorf(rpc.CodeForbidden, "node not permitted")
+			}
 			s := h.reg.get(p.Node)
 			if s == nil {
 				return nil, rpc.Errorf(rpc.CodeOffline, "node offline")
@@ -382,6 +417,9 @@ func (h *Hub) consoleHandler(sess *consoleSession, actor Actor) rpc.Handler {
 				Tags  []string `json:"tags"`
 			}
 			json.Unmarshal(params, &p)
+			if !actor.nodeAllowed(p.Node) {
+				return nil, rpc.Errorf(rpc.CodeForbidden, "node not permitted")
+			}
 			s := h.reg.get(p.Node)
 			if s == nil {
 				return nil, rpc.Errorf(rpc.CodeOffline, "node offline")
@@ -399,6 +437,9 @@ func (h *Hub) consoleHandler(sess *consoleSession, actor Actor) rpc.Handler {
 				Node string `json:"node"`
 			}
 			json.Unmarshal(params, &p)
+			if !actor.nodeAllowed(p.Node) {
+				return nil, rpc.Errorf(rpc.CodeForbidden, "node not permitted")
+			}
 			if s := h.reg.get(p.Node); s != nil {
 				s.peer.Close()
 			}
