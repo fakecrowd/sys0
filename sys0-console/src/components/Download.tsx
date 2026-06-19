@@ -7,6 +7,15 @@ function human(n: number): string {
   return (n / 1024 / 1024).toFixed(1) + " MB";
 }
 
+// downloadHref routes through the hub's direct-stream proxy (/api/v1/agent|rescue)
+// when os/arch are known, so downloads work on networks that can reach the hub
+// but not GitHub. Falls back to the raw asset URL otherwise.
+function downloadHref(a: ReleaseAsset): string {
+  const kind = a.kind === "rescue" ? "rescue" : "agent";
+  if (a.os && a.arch) return `/api/v1/${kind}?os=${encodeURIComponent(a.os)}&arch=${encodeURIComponent(a.arch)}`;
+  return a.url;
+}
+
 function AssetTable({ title, empty, assets }: { title: string; empty: string; assets: ReleaseAsset[] }) {
   return (
     <div>
@@ -32,7 +41,7 @@ function AssetTable({ title, empty, assets }: { title: string; empty: string; as
                 <td className="mono-sm" style={{ padding: "8px", wordBreak: "break-all" }}>{a.name}</td>
                 <td className="mono-sm" style={{ padding: "8px" }}>{human(a.size)}</td>
                 <td style={{ padding: "8px" }}>
-                  <a className="btn btn-accent" href={a.url}>下载</a>
+                  <a className="btn btn-accent" href={downloadHref(a)}>下载</a>
                 </td>
               </tr>
             ))}

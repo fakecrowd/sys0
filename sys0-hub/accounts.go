@@ -278,34 +278,29 @@ func (h *Hub) apiReleases(c *gin.Context) {
 	c.Data(http.StatusOK, "application/json", payload)
 }
 
-// apiAgentRedirect 302-redirects to the download URL of the latest agent binary
-// matching ?os=&arch=. This lets a minimal client (e.g. sys0-rescue) fetch the
-// right agent with a single GET + redirect-follow, no JSON parsing required.
-// os/arch default to the requester is irrelevant server-side; caller must pass
-// them (linux|darwin|windows, amd64|arm64). Public, no auth.
+// apiAgentRedirect streams the latest agent binary matching ?os=&arch= DIRECTLY
+// from the hub (HTTP 200 + body), proxying it from the GitHub release. It does
+// NOT 302 to github.com — many restricted networks can reach the hub but not
+// GitHub/its CDN, so a redirect would leave them unable to download. A minimal
+// client (e.g. sys0-rescue) fetches the right agent with a single GET, no JSON
+// parsing required. Caller must pass os/arch (linux|darwin|windows,
+// amd64|arm64). Public, no auth.
 func (h *Hub) apiAgentRedirect(c *gin.Context) {
-	wantOS := strings.ToLower(c.Query("os"))
-	wantArch := strings.ToLower(c.Query("arch"))
-	if wantOS == "" || wantArch == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "os and arch query params required"})
-		return
-	}
-	payload, err := cachedReleasePayload()
-	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
-		return
-	}
-	url, ok := assetURLFor(payload, "agent", wantOS, wantArch)
-	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no agent asset for " + wantOS + "/" + wantArch})
-		return
-	}
-	c.Redirect(http.StatusFound, url)
+	h.serveBinary(c, "agent")
 }
 
-// apiRescueRedirect 302-redirects to the latest sys0-rescue binary matching
-// ?os=&arch=. Same contract as apiAgentRedirect. Public, no auth.
+// apiRescueRedirect streams the latest sys0-rescue binary matching ?os=&arch=
+// directly from the hub. Same direct-proxy contract as apiAgentRedirect (no
+// github.com redirect). Public, no auth.
 func (h *Hub) apiRescueRedirect(c *gin.Context) {
+	h.serveBinary(c, "rescue")
+}
+
+// serveBinary resolves the release asset of the given kind/os/arch and streams
+// its bytes to the client as 200 OK, proxying from GitHub through the hub. This
+// is the key to working on networks that can reach the hub but not GitHub: the
+// node never talks to github.com — only to the hub it already trusts.
+func (h *Hub) serveBinary(c *gin.Context, kind string) {
 	wantOS := strings.ToLower(c.Query("os"))
 	wantArch := strings.ToLower(c.Query("arch"))
 	if wantOS == "" || wantArch == "" {
@@ -317,35 +312,101 @@ func (h *Hub) apiRescueRedirect(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	url, ok := assetURLFor(payload, "rescue", wantOS, wantArch)
+	url, name, ok := assetFor(payload, kind, wantOS, wantArch)
 	if !ok {
-		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no rescue asset for " + wantOS + "/" + wantArch})
+		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no " + kind + " asset for " + wantOS + "/" + wantArch})
 		return
 	}
-	c.Redirect(http.StatusFound, url)
+	body, ctype, err := fetchBinary(url)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	if name != "" {
+		c.Header("Content-Disposition", "attachment; filename=\""+name+"\"")
+	}
+	c.Header("Content-Length", strconv.Itoa(len(body)))
+	c.Data(http.StatusOK, ctype, body)
 }
 
-// assetURLFor finds the download URL of the asset with the given kind/os/arch in
-// the compact release payload.
-func assetURLFor(payload []byte, kind, wantOS, wantArch string) (string, bool) {
+// ---- release binary proxy cache ----
+
+// binCacheEntry is a cached release binary (bytes + content-type) keyed by its
+// download URL. The asset set is tiny (~12 files) and changes only on a new
+// release, so a short-TTL in-memory cache keeps the hub from re-pulling from
+// GitHub on every node download while staying bounded.
+type binCacheEntry struct {
+	fetched time.Time
+	body    []byte
+	ctype   string
+}
+
+var (
+	binCacheMu sync.Mutex
+	binCache   = map[string]binCacheEntry{}
+)
+
+const binCacheTTL = 30 * time.Minute
+const binMaxSize = 64 << 20 // 64 MiB per asset hard cap
+
+// fetchBinary downloads a release asset URL server-side, following redirects
+// (github.com -> objects.githubusercontent.com), and memoizes the bytes for
+// binCacheTTL. Returns (body, contentType, error).
+func fetchBinary(url string) ([]byte, string, error) {
+	binCacheMu.Lock()
+	if e, ok := binCache[url]; ok && time.Since(e.fetched) < binCacheTTL {
+		body, ctype := e.body, e.ctype
+		binCacheMu.Unlock()
+		return body, ctype, nil
+	}
+	binCacheMu.Unlock()
+
+	req, _ := http.NewRequest("GET", url, nil)
+	req.Header.Set("User-Agent", "sys0-hub")
+	resp, err := http.DefaultClient.Do(req) // default client follows up to 10 redirects
+	if err != nil {
+		return nil, "", fmt.Errorf("fetch binary: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("upstream status %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, binMaxSize))
+	if err != nil {
+		return nil, "", fmt.Errorf("read binary: %w", err)
+	}
+	ctype := resp.Header.Get("Content-Type")
+	if ctype == "" {
+		ctype = "application/octet-stream"
+	}
+	binCacheMu.Lock()
+	binCache[url] = binCacheEntry{fetched: time.Now(), body: body, ctype: ctype}
+	binCacheMu.Unlock()
+	return body, ctype, nil
+}
+
+// assetFor finds the download URL AND filename of the asset with the given
+// kind/os/arch in the compact release payload.
+func assetFor(payload []byte, kind, wantOS, wantArch string) (url, name string, ok bool) {
 	var parsed struct {
 		OK     bool `json:"ok"`
 		Assets []struct {
 			URL  string `json:"url"`
+			Name string `json:"name"`
 			OS   string `json:"os"`
 			Arch string `json:"arch"`
 			Kind string `json:"kind"`
 		} `json:"assets"`
 	}
 	if err := json.Unmarshal(payload, &parsed); err != nil || !parsed.OK {
-		return "", false
+		return "", "", false
 	}
 	for _, a := range parsed.Assets {
 		if a.Kind == kind && a.OS == wantOS && a.Arch == wantArch && a.URL != "" {
-			return a.URL, true
+			return a.URL, a.Name, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 // ---- rescue liveness (sys0-rescue -> hub binding) ----
