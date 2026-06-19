@@ -8,7 +8,7 @@ import { Monitor } from "./components/Monitor";
 import { Actions } from "./components/Actions";
 import { Audit } from "./components/Audit";
 import { Keys } from "./components/Keys";
-import { Accounts } from "./components/Accounts";
+import { AccountModal } from "./components/AccountModal";
 import { Setup } from "./components/Setup";
 import { Download } from "./components/Download";
 import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
@@ -101,6 +101,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const [focused, setFocused] = useState<string>("");
   const [live, setLive] = useState<Record<string, any>>({});
   const [navOpen, setNavOpen] = useState(false); // mobile node drawer
+  const [acctOpen, setAcctOpen] = useState(false); // account modal (node-independent)
   const isAdmin = getRole() === "admin";
 
   const refresh = useCallback(async () => {
@@ -142,7 +143,6 @@ function Console({ onLogout }: { onLogout: () => void }) {
     { key: "audit", title: "审计", render: () => <Audit /> },
     ...(isAdmin ? [
       { key: "keys", title: "密钥", render: () => <Keys /> },
-      { key: "accounts", title: "账户", render: () => <Accounts nodes={nodes} meName={getUser()} /> },
     ] as WinApp[] : []),
   ] : [];
 
@@ -158,8 +158,11 @@ function Console({ onLogout }: { onLogout: () => void }) {
         </div>
         <div className="flex items-center gap-3 min-w-0">
           <span className="mono-sm truncate">
-            {nodes.filter((n) => n.state === "online").length} online · {focusedNode ? `▸ ${focusedNode.label}` : "未聚焦"} · {getRole()}
+            {nodes.filter((n) => n.state === "online").length} online · {focusedNode ? `▸ ${focusedNode.label}` : "未聚焦"}
           </span>
+          <button className="btn" title="账户" onClick={() => setAcctOpen(true)}>
+            <span className="dot" style={{ background: "var(--accent)" }} /> {getUser() || getRole()}
+          </button>
           <button className="btn" onClick={onLogout}>退出</button>
         </div>
       </header>
@@ -181,6 +184,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
               </div>}
         </main>
       </div>
+      {acctOpen && <AccountModal nodes={nodes} onClose={() => setAcctOpen(false)} />}
     </div>
   );
 }

@@ -1,22 +1,35 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { confirmDialog, alertDialog } from "./dialogs";
 
 // Process list for the FOCUSED node. Node is fixed by the workspace.
+// Optional auto-refresh (default OFF) re-lists every few seconds.
 export function Processes({ node }: { node: string }) {
   const [filter, setFilter] = useState("");
   const [procs, setProcs] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [auto, setAuto] = useState(false); // auto-refresh, default off
+  const filterRef = useRef(filter);
+  useEffect(() => { filterRef.current = filter; }, [filter]);
 
   const load = async () => {
     if (!node) return;
     setBusy(true); setErr("");
     try {
-      const v = await api.one(node, "proc.list", { filter });
+      const v = await api.one(node, "proc.list", { filter: filterRef.current });
       setProcs((v.procs || []).sort((a: any, b: any) => b.rss - a.rss));
     } catch (e) { setErr(String(e)); } finally { setBusy(false); }
   };
+
+  // auto-refresh loop
+  useEffect(() => {
+    if (!auto) return;
+    load(); // immediate refresh when toggled on
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [auto, node]);
 
   const kill = async (pid: number, name: string, sig: string) => {
     if (!(await confirmDialog(`${sig} ${name}（pid ${pid}）@ ${node}?`, { title: "结束进程", danger: sig === "KILL" }))) return;
@@ -26,10 +39,16 @@ export function Processes({ node }: { node: string }) {
 
   return (
     <div className="flex flex-col gap-3 h-full">
-      <div className="flex gap-2 items-center">
-        <input className="input" placeholder="filter by name" value={filter}
+      <div className="flex gap-2 items-center flex-wrap">
+        <input className="input" style={{ flex: 1, minWidth: 140 }} placeholder="filter by name" value={filter}
           onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
         <button className="btn btn-accent" disabled={busy || !node} onClick={load}>列出</button>
+        <label className="flex items-center gap-1 cursor-pointer mono-sm" title="每 3 秒自动刷新">
+          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)}
+            style={{ accentColor: "var(--accent)" }} />
+          自动刷新
+        </label>
+        {auto && <span className="dot" style={{ background: "var(--accent)", boxShadow: "0 0 6px var(--accent)" }} title="自动刷新中" />}
       </div>
       {err && <div style={{ color: "var(--danger)" }}>{err}</div>}
       <div className="panel flex-1 overflow-auto">

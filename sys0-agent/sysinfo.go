@@ -9,6 +9,7 @@ import (
 
 	"github.com/fakecrowd/sys0/internal/wire"
 	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/host"
 	"github.com/shirou/gopsutil/v4/load"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -45,18 +46,49 @@ func sampleMetrics() wire.Metrics {
 	if pct, err := cpu.Percent(120*time.Millisecond, false); err == nil && len(pct) > 0 {
 		m.CPUPct = round2(pct[0])
 	}
+	if pc, err := cpu.Percent(0, true); err == nil {
+		m.CPUCores = make([]float64, len(pc))
+		for i, v := range pc {
+			m.CPUCores[i] = round2(v)
+		}
+	}
 	if vm, err := mem.VirtualMemory(); err == nil {
 		m.MemTotal = vm.Total
 		m.MemUsed = vm.Used
 	}
+	if sw, err := mem.SwapMemory(); err == nil {
+		m.SwapTotal = sw.Total
+		m.SwapUsed = sw.Used
+	}
 	if la, err := load.Avg(); err == nil {
 		m.Load1 = round2(la.Load1)
+		m.Load5 = round2(la.Load5)
+		m.Load15 = round2(la.Load15)
 	}
 	if io, err := gnet.IOCounters(false); err == nil && len(io) > 0 {
 		m.NetRx = io[0].BytesRecv
 		m.NetTx = io[0].BytesSent
 	}
+	if du, err := disk.Usage(rootMount()); err == nil {
+		m.DiskUsed = du.Used
+		m.DiskTotal = du.Total
+	}
+	if procs, err := process.Pids(); err == nil {
+		m.Procs = len(procs)
+	}
+	if h, err := host.Uptime(); err == nil {
+		m.UptimeSec = h
+	}
 	return m
+}
+
+// rootMount returns the path whose disk usage best represents the system
+// volume: C:\ on Windows, / elsewhere.
+func rootMount() string {
+	if runtime.GOOS == "windows" {
+		return "C:\\"
+	}
+	return "/"
 }
 
 // procList enumerates processes (cross-platform via gopsutil).

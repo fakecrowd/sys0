@@ -209,13 +209,22 @@ type HostInfoResult struct {
 }
 
 type Metrics struct {
-	TS       int64   `json:"ts"`
-	CPUPct   float64 `json:"cpuPct"`
-	MemUsed  uint64  `json:"memUsed"`
-	MemTotal uint64  `json:"memTotal"`
-	Load1    float64 `json:"load1"`
-	NetRx    uint64  `json:"netRx"`
-	NetTx    uint64  `json:"netTx"`
+	TS        int64     `json:"ts"`
+	CPUPct    float64   `json:"cpuPct"`
+	CPUCores  []float64 `json:"cpuCores,omitempty"` // per-core utilisation %
+	MemUsed   uint64    `json:"memUsed"`
+	MemTotal  uint64    `json:"memTotal"`
+	SwapUsed  uint64    `json:"swapUsed"`
+	SwapTotal uint64    `json:"swapTotal"`
+	Load1     float64   `json:"load1"`
+	Load5     float64   `json:"load5"`
+	Load15    float64   `json:"load15"`
+	NetRx     uint64    `json:"netRx"` // cumulative bytes
+	NetTx     uint64    `json:"netTx"`
+	DiskUsed  uint64    `json:"diskUsed"`  // root/system volume
+	DiskTotal uint64    `json:"diskTotal"`
+	Procs     int       `json:"procs"`     // process count
+	UptimeSec uint64    `json:"uptimeSec"`
 }
 
 type HostWatchParams struct {

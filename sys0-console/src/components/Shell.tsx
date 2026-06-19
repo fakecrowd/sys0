@@ -172,7 +172,13 @@ export function Shell({ node }: { node: string }) {
     return () => { ro.disconnect(); window.removeEventListener("resize", fitActive); };
   }, [fitActive]);
 
-  useEffect(() => () => disconnect(), []); // cleanup on unmount
+  // Auto-connect on mount (no manual button) — the workspace is already bound
+  // to a node, so opening the Shell window should immediately attach.
+  useEffect(() => {
+    connect();
+    return () => disconnect();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="flex flex-col gap-2 h-full">
