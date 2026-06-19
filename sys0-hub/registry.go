@@ -23,6 +23,8 @@ type nodeSession struct {
 	tags     []string
 	host     wire.HostSummary
 	version  string
+	agentCwd string
+	agentPid int
 	lastSeen time.Time
 }
 
@@ -35,6 +37,8 @@ type NodeView struct {
 	Version       string           `json:"version"`
 	State         string           `json:"state"`
 	LastSeen      int64            `json:"lastSeen"`
+	AgentCwd      string           `json:"agentCwd,omitempty"` // agent's working directory
+	AgentPid      int              `json:"agentPid,omitempty"` // agent's own pid
 	Rescue        bool             `json:"rescue"`        // a sys0-rescue is supervising this node
 	RescueVersion string           `json:"rescueVersion"` // reported rescue build
 	// RescueInfo is the full live rescue status (phase/detail/restarts/…) for
@@ -58,6 +62,7 @@ func (n *nodeSession) view() NodeView {
 	return NodeView{
 		ID: n.nodeID, Label: n.label, Tags: tags, Host: n.host,
 		Version: n.version, State: "online", LastSeen: n.lastSeen.Unix(),
+		AgentCwd: n.agentCwd, AgentPid: n.agentPid,
 		Rescue: rs.Live, RescueVersion: rs.Version, RescueInfo: ri,
 	}
 }

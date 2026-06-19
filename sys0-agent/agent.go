@@ -121,6 +121,8 @@ func (a *Agent) session(ctx context.Context) error {
 		Key: a.cfg.Key, Fingerprint: a.fingerprint, Label: a.label,
 		Host:         wire.HostSummary{Name: hi.Hostname, OS: hi.OS, Arch: hi.Arch, Kernel: hi.Kernel, IP: hi.IP},
 		AgentVersion: version,
+		Cwd:          hi.Cwd,
+		Pid:          hi.Pid,
 		Capabilities: capabilities(),
 	}
 	hctx, hcancel := context.WithTimeout(sctx, 10*time.Second)

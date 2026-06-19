@@ -360,8 +360,17 @@ type rescueInfo struct {
 	restarts     int    // how many times the rescue has (re)started the agent
 	lastExit     int    // last agent exit code (-1 = none yet)
 	lastUptimeMs int64  // how long the agent ran last time
+	cwd          string // rescue work dir (download/stage/decoy location)
+	agentPid     int    // pid of the agent the rescue currently supervises (-1 = none)
+	trace        []traceEvent // recent rescue activity (agent startup sequence, etc.)
 	firstSeen    time.Time
 	lastSeen     time.Time
+}
+
+// traceEvent is one timestamped line from the rescue's activity log.
+type traceEvent struct {
+	T int64  `json:"t"` // unix seconds
+	M string `json:"m"` // message
 }
 
 // rescueReports tracks, per node id, the most recent rescue report. A node is
@@ -417,6 +426,9 @@ type rescueView struct {
 	LastUptimeMs int64           `json:"lastUptimeMs"`
 	SinceSec     int64           `json:"sinceSec"`           // seconds the rescue has been continuously reporting
 	AgeSec       int64           `json:"ageSec"`             // seconds since the last report
+	Cwd          string          `json:"cwd,omitempty"`      // rescue work dir
+	AgentPid     int             `json:"agentPid,omitempty"` // supervised agent pid
+	Trace        []traceEvent    `json:"trace,omitempty"`    // recent rescue activity (startup sequence)
 	Commands     []rescueCommand `json:"commands,omitempty"` // recent operator commands + their status
 }
 
@@ -440,6 +452,9 @@ func rescueStatus(nodeID string) rescueView {
 		Restarts:     info.restarts,
 		LastExit:     info.lastExit,
 		LastUptimeMs: info.lastUptimeMs,
+		Cwd:          info.cwd,
+		AgentPid:     info.agentPid,
+		Trace:        info.trace,
 		SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
 		AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
 		Commands:     rescueCommandHistory(nodeID),
@@ -469,6 +484,9 @@ func liveRescueNodes() map[string]rescueView {
 			Restarts:     info.restarts,
 			LastExit:     info.lastExit,
 			LastUptimeMs: info.lastUptimeMs,
+			Cwd:          info.cwd,
+			AgentPid:     info.agentPid,
+			Trace:        info.trace,
 			SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
 			AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
 			Commands:     rescueCommandHistory(id),
@@ -492,9 +510,12 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 		Arch         string `json:"arch"`
 		Status       string `json:"status"`
 		Detail       string `json:"detail"`
+		Cwd          string `json:"cwd"`
+		AgentPid     int    `json:"agentPid"`
 		Restarts     int    `json:"restarts"`
 		LastExit     int    `json:"lastExit"`
 		LastUptimeMs int64  `json:"lastUptimeMs"`
+		Trace        []traceEvent `json:"trace"`
 		Results      []struct {
 			ID     string `json:"id"`
 			Status string `json:"status"`
@@ -519,6 +540,21 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 	if body.Status == "" {
 		body.Status = "supervising"
 	}
+	if len(body.Cwd) > 512 {
+		body.Cwd = body.Cwd[:512]
+	}
+	// Clamp trace to keep the in-memory map bounded (rescue caps at ~12, but be safe).
+	if len(body.Trace) > 24 {
+		body.Trace = body.Trace[len(body.Trace)-24:]
+	}
+	for i := range body.Trace {
+		if len(body.Trace[i].M) > 160 {
+			body.Trace[i].M = body.Trace[i].M[:160]
+		}
+	}
+	if body.AgentPid == 0 {
+		body.AgentPid = -1 // rescue sends -1 for "no agent"; normalize a missing field too
+	}
 	nodeID := "n" + body.Fingerprint[:6]
 	now := time.Now()
 	rescueMu.Lock()
@@ -541,6 +577,9 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 		restarts:     body.Restarts,
 		lastExit:     body.LastExit,
 		lastUptimeMs: body.LastUptimeMs,
+		cwd:          body.Cwd,
+		agentPid:     body.AgentPid,
+		trace:        body.Trace,
 		firstSeen:    first,
 		lastSeen:     now,
 	}

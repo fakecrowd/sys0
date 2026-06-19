@@ -84,6 +84,8 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 	n.tags = tags
 	n.host = hello.Host
 	n.version = hello.AgentVersion
+	n.agentCwd = hello.Cwd
+	n.agentPid = hello.Pid
 	n.lastSeen = time.Now()
 	n.mu.Unlock()
 

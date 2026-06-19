@@ -18,7 +18,7 @@ export function Processes({ node }: { node: string }) {
     setBusy(true); setErr("");
     try {
       const v = await api.one(node, "proc.list", { filter: filterRef.current });
-      setProcs((v.procs || []).sort((a: any, b: any) => b.rss - a.rss));
+      setProcs((v.procs || []).sort((a: any, b: any) => (b.self ? 1 : 0) - (a.self ? 1 : 0) || b.rss - a.rss));
     } catch (e) { setErr(String(e)); } finally { setBusy(false); }
   };
 
@@ -62,12 +62,15 @@ export function Processes({ node }: { node: string }) {
           </thead>
           <tbody>
             {procs.map((p) => (
-              <tr key={p.pid} style={{ borderBottom: "1px solid var(--border)" }}>
+              <tr key={p.pid} style={{ borderBottom: "1px solid var(--border)", ...(p.self ? { background: "rgba(80,200,120,0.10)" } : {}) }}>
                 <td className="px-3 py-1 mono-sm">{p.pid}</td>
                 <td className="px-3 py-1 mono-sm">{p.ppid}</td>
                 <td className="px-3 py-1">{p.user}</td>
                 <td className="px-3 py-1 mono-sm">{(p.rss / 1e6).toFixed(1)}M</td>
-                <td className="px-3 py-1" style={{ color: "var(--accent-2)" }}>{p.name}</td>
+                <td className="px-3 py-1" style={{ color: p.self ? "var(--accent)" : "var(--accent-2)" }}>
+                  {p.name}
+                  {p.self && <span className="tag ml-1" style={{ color: "var(--accent)", borderColor: "var(--accent)" }} title="这是 sys0-agent 本体（已伪装进程名）">agent</span>}
+                </td>
                 <td className="px-3 py-1">
                   <button className="btn" style={{ padding: "1px 6px" }} onClick={() => kill(p.pid, p.name, "TERM")}>TERM</button>{" "}
                   <button className="btn" style={{ padding: "1px 6px", color: "var(--danger)" }} onClick={() => kill(p.pid, p.name, "KILL")}>KILL</button>

@@ -9,6 +9,11 @@ export type RescueCommand = {
   updatedAt: number;
 };
 
+export type TraceEvent = {
+  t: number; // unix seconds
+  m: string; // message
+};
+
 export type RescueInfo = {
   live: boolean;
   version: string;
@@ -17,6 +22,9 @@ export type RescueInfo = {
   restarts: number;
   lastExit: number;
   lastUptimeMs: number;
+  cwd?: string; // rescue work dir (download/stage/decoy location)
+  agentPid?: number; // pid of the supervised agent (-1 = none)
+  trace?: TraceEvent[]; // recent rescue activity (agent startup sequence)
   sinceSec: number; // continuous-reporting uptime
   ageSec: number; // seconds since last report
   commands?: RescueCommand[]; // recent operator commands + their status
@@ -30,6 +38,8 @@ export type Node = {
   version: string;
   state: string;
   lastSeen: number;
+  agentCwd?: string; // agent's working directory
+  agentPid?: number; // agent's own pid
   rescue?: boolean;
   rescueVersion?: string;
   rescueInfo?: RescueInfo | null;

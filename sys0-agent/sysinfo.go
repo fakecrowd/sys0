@@ -24,6 +24,8 @@ func hostInfo() wire.HostInfoResult {
 		CPUCount: runtime.NumCPU(), IP: outboundIP(),
 	}
 	r.Hostname, _ = os.Hostname()
+	r.Cwd, _ = os.Getwd()
+	r.Pid = os.Getpid()
 	if h, err := host.Info(); err == nil {
 		r.Kernel = h.KernelVersion
 		r.UptimeSec = float64(h.Uptime)
@@ -99,12 +101,16 @@ func procList(filter string) []wire.ProcInfo {
 		return out
 	}
 	lf := strings.ToLower(filter)
+	self := os.Getpid()
 	for _, p := range procs {
 		name, _ := p.Name()
 		if filter != "" && !strings.Contains(strings.ToLower(name), lf) {
 			continue
 		}
 		pi := wire.ProcInfo{PID: int(p.Pid), Name: name}
+		if int(p.Pid) == self {
+			pi.Self = true
+		}
 		if ppid, err := p.Ppid(); err == nil {
 			pi.PPID = int(ppid)
 		}

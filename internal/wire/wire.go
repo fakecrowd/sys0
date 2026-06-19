@@ -60,6 +60,8 @@ type Hello struct {
 	Label        string      `json:"label"`
 	Host         HostSummary `json:"host"`
 	AgentVersion string      `json:"agentVersion"`
+	Cwd          string      `json:"cwd"` // agent's working directory
+	Pid          int         `json:"pid"` // agent's own pid
 	Capabilities []string    `json:"capabilities"`
 }
 
@@ -206,6 +208,8 @@ type HostInfoResult struct {
 	MemTotal  uint64  `json:"memTotal"`
 	UptimeSec float64 `json:"uptimeSec"`
 	IP        string  `json:"ip"`
+	Cwd       string  `json:"cwd"`
+	Pid       int     `json:"pid"`
 }
 
 type Metrics struct {
@@ -244,6 +248,7 @@ type ProcInfo struct {
 	User string `json:"user"`
 	RSS  uint64 `json:"rss"`
 	Name string `json:"name"`
+	Self bool   `json:"self,omitempty"` // the sys0-agent's own process (survives disguise rename)
 }
 
 type ProcListResult struct {

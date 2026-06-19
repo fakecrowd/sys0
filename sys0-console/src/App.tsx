@@ -321,6 +321,11 @@ function NodeCard({
       <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
         agent {n.version || "—"}{n.rescue ? ` · rescue ${n.rescueVersion || "?"}` : ""}
       </div>
+      {!offline && (n.agentPid || n.agentCwd) && (
+        <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
+          {n.agentPid ? `pid ${n.agentPid}` : ""}{n.agentPid && n.agentCwd ? " · " : ""}{n.agentCwd ? `cwd ${n.agentCwd}` : ""}
+        </div>
+      )}
       {n.rescue && rescueOpen && <RescueDetail nodeId={n.id} r={n.rescueInfo} fallbackVer={n.rescueVersion} onChanged={onChanged} />}
       {m && !offline && (
         <div className="mono-sm mt-1">
@@ -373,6 +378,14 @@ function fmtDur(sec: number): string {
   return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`;
 }
 
+// fmtClock renders a unix-seconds timestamp as local HH:MM:SS for the trace log.
+function fmtClock(t: number): string {
+  if (!t) return "—";
+  const d = new Date(t * 1000);
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 const CMD_LABEL: Record<string, string> = {
   "update-agent": "更新 agent",
   "restart-agent": "重启 agent",
@@ -397,6 +410,8 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
   if (r?.detail) rows.push(["详情", r.detail]);
   rows.push(["版本", r?.version || fallbackVer || "—"]);
   if (r) {
+    if (r.agentPid && r.agentPid > 0) rows.push(["agent pid", String(r.agentPid)]);
+    if (r.cwd) rows.push(["工作目录", r.cwd]);
     rows.push(["重启次数", String(r.restarts)]);
     if (r.lastExit >= 0 || r.lastUptimeMs > 0)
       rows.push(["上次退出", `code=${r.lastExit}${r.lastUptimeMs ? ` · 存活 ${fmtDur(Math.round(r.lastUptimeMs / 1000))}` : ""}`]);
@@ -416,6 +431,8 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
   // Active (non-terminal) commands shown newest-first; terminal ones too but
   // de-emphasised. Only show controls when the rescue is actually live.
   const cmds: RescueCommand[] = (r?.commands || []).slice().reverse();
+  // Trace newest-last (chronological), capped to the most recent entries.
+  const trace = (r?.trace || []).slice(-12);
 
   return (
     <div className="mono-sm mt-1.5 p-2" style={{ background: "#0b1013", border: "1px solid var(--border)", borderRadius: 6 }}>
@@ -429,6 +446,20 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
           <span style={{ wordBreak: "break-all" }}>{v}</span>
         </div>
       ))}
+
+      {trace.length > 0 && (
+        <div className="mt-2" style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+          <div style={{ color: "var(--muted)", marginBottom: 3 }}>活动追踪</div>
+          <div style={{ maxHeight: 160, overflowY: "auto" }}>
+            {trace.map((ev, i) => (
+              <div key={i} className="flex gap-2" style={{ lineHeight: 1.5 }}>
+                <span style={{ color: "var(--muted)", minWidth: 56, flexShrink: 0 }}>{fmtClock(ev.t)}</span>
+                <span style={{ wordBreak: "break-all" }}>{ev.m}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {r?.live && (
         <div className="flex flex-wrap gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
