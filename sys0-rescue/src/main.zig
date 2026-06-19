@@ -56,6 +56,7 @@ pub const arch_name = switch (builtin.cpu.arch) {
 };
 
 pub const agent_filename = if (builtin.os.tag == .windows) "sys0-agent.exe" else "sys0-agent";
+pub const rescue_filename = if (builtin.os.tag == .windows) "sys0-rescue.exe" else "sys0-rescue";
 pub const sep = std.fs.path.sep;
 
 // ---- config ---------------------------------------------------------------
@@ -480,6 +481,82 @@ fn downloadAgent(gpa: std.mem.Allocator, io: Io, cfg: Config, dest_path: []const
         return error.DownloadInvalid;
     }
     logLine("agent installed: {s}", .{dest_path});
+}
+
+// relocateToDataDir ensures the rescue runs from a STABLE path inside the
+// data-dir, not from wherever the user launched it (a browser Downloads
+// folder, a USB stick, a temp dir that may be cleaned up). On first launch the
+// running exe is NOT the data-dir copy, so we copy ourselves there, spawn THAT
+// copy as the real supervisor, and tell the caller to exit. The spawned copy
+// sees exe==dest and runs normally. This guarantees the supervisor (and the
+// autostart entry, which already points at this same data-dir copy) live at one
+// fixed location that survives the original download being moved or deleted.
+//
+// Returns true if it relocated (caller should exit). Best-effort: on ANY error
+// it returns false so the rescue still runs from its current location.
+fn relocateToDataDir(gpa: std.mem.Allocator, io: Io, cfg: Config) bool {
+    var exe_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const n = std.process.executablePath(io, &exe_buf) catch |err| {
+        logLine("relocate: cannot resolve own path ({s}); running in place", .{@errorName(err)});
+        return false;
+    };
+    const exe_path = exe_buf[0..n];
+
+    const dest = std.fmt.allocPrint(gpa, "{s}{c}{s}", .{ cfg.data_dir, sep, rescue_filename }) catch return false;
+
+    // Already running from the fixed path — nothing to do.
+    if (std.mem.eql(u8, exe_path, dest)) return false;
+
+    // Copy the running binary to the fixed data-dir path (truncate any older copy).
+    const cwd = Io.Dir.cwd();
+    const src = cwd.openFile(io, exe_path, .{ .mode = .read_only }) catch |err| {
+        logLine("relocate: open self failed ({s}); running in place", .{@errorName(err)});
+        return false;
+    };
+    defer src.close(io);
+    const st = src.stat(io) catch return false;
+    const buf = gpa.alloc(u8, st.size) catch return false;
+    defer gpa.free(buf);
+    var rbuf: [64 * 1024]u8 = undefined;
+    var reader = src.reader(io, &rbuf);
+    reader.interface.readSliceAll(buf) catch |err| {
+        logLine("relocate: read self failed ({s}); running in place", .{@errorName(err)});
+        return false;
+    };
+    var out = cwd.createFile(io, dest, .{ .truncate = true }) catch |err| {
+        logLine("relocate: create {s} failed ({s}); running in place", .{ dest, @errorName(err) });
+        return false;
+    };
+    {
+        defer out.close(io);
+        var wbuf: [64 * 1024]u8 = undefined;
+        var w = out.writer(io, &wbuf);
+        w.interface.writeAll(buf) catch |err| {
+            logLine("relocate: write {s} failed ({s}); running in place", .{ dest, @errorName(err) });
+            return false;
+        };
+        w.interface.flush() catch return false;
+        if (builtin.os.tag != .windows) out.setPermissions(io, .fromMode(0o755)) catch {};
+    }
+
+    // Spawn the fixed-path copy as the real supervisor, preserving config. We do
+    // NOT wait on it: the child becomes the long-lived supervisor and this
+    // process exits, handing off cleanly.
+    const argv: []const []const u8 = if (cfg.no_install)
+        &.{ dest, "--hub", cfg.hub, "--data-dir", cfg.data_dir, "--key", cfg.key, "--no-install" }
+    else
+        &.{ dest, "--hub", cfg.hub, "--data-dir", cfg.data_dir, "--key", cfg.key };
+    _ = std.process.spawn(io, .{
+        .argv = argv,
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    }) catch |err| {
+        logLine("relocate: spawn {s} failed ({s}); running in place", .{ dest, @errorName(err) });
+        return false;
+    };
+    logLine("relocated to {s} — handing off, this instance exiting", .{dest});
+    return true;
 }
 
 fn ensureAgent(gpa: std.mem.Allocator, io: Io, cfg: Config, dest_path: []const u8) !void {
@@ -1155,6 +1232,13 @@ pub fn main(init: std.process.Init) !void {
         .help => unreachable,
         .run => {},
     }
+
+    // RELOCATE FIRST: on a normal run, make sure we are the copy living at the
+    // fixed data-dir path. If launched from elsewhere (Downloads, USB, temp),
+    // copy self there, spawn that copy as the supervisor, and exit. --once skips
+    // this (throwaway). The fixed copy is also what autostart points at, so the
+    // supervisor always runs from one stable location.
+    if (!cfg.once and relocateToDataDir(gpa, io, cfg)) return;
 
     var agent_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const agent_path = try std.fmt.bufPrint(&agent_path_buf, "{s}{c}{s}", .{ cfg.data_dir, sep, agent_filename });

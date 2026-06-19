@@ -68,6 +68,10 @@ func main() {
 		}
 	}
 
+	// Keep the release binaries hot in the hub's in-memory cache so node
+	// downloads are served from memory, never blocked on a slow hub->GitHub pull.
+	go startBinaryWarmer(log)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

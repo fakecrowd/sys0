@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -349,9 +350,10 @@ var (
 const binCacheTTL = 30 * time.Minute
 const binMaxSize = 64 << 20 // 64 MiB per asset hard cap
 
-// fetchBinary downloads a release asset URL server-side, following redirects
-// (github.com -> objects.githubusercontent.com), and memoizes the bytes for
-// binCacheTTL. Returns (body, contentType, error).
+// fetchBinary returns the asset bytes for url, served from binCache when fresh
+// (within binCacheTTL) and otherwise pulled from GitHub via pullBinary. This is
+// the node-facing hot path (serveBinary); the cache warmer keeps entries fresh
+// so this almost always hits memory instead of a slow hub->GitHub fetch.
 func fetchBinary(url string) ([]byte, string, error) {
 	binCacheMu.Lock()
 	if e, ok := binCache[url]; ok && time.Since(e.fetched) < binCacheTTL {
@@ -360,7 +362,14 @@ func fetchBinary(url string) ([]byte, string, error) {
 		return body, ctype, nil
 	}
 	binCacheMu.Unlock()
+	return pullBinary(url)
+}
 
+// pullBinary unconditionally downloads a release asset URL server-side,
+// following redirects (github.com -> objects.githubusercontent.com), stores the
+// bytes in binCache, and returns (body, contentType, error). Used by
+// fetchBinary on a cache miss and by the cache warmer to refresh entries.
+func pullBinary(url string) ([]byte, string, error) {
 	req, _ := http.NewRequest("GET", url, nil)
 	req.Header.Set("User-Agent", "sys0-hub")
 	resp, err := http.DefaultClient.Do(req) // default client follows up to 10 redirects
@@ -383,6 +392,78 @@ func fetchBinary(url string) ([]byte, string, error) {
 	binCache[url] = binCacheEntry{fetched: time.Now(), body: body, ctype: ctype}
 	binCacheMu.Unlock()
 	return body, ctype, nil
+}
+
+// ---- release binary cache warmer ----
+
+const (
+	binWarmInterval = 5 * time.Minute  // how often the warmer checks freshness
+	binWarmMaxAge   = 20 * time.Minute // re-pull assets older than this (< binCacheTTL so a cached asset never lapses while nodes are pulling)
+)
+
+// assetBinaryURLs returns the download URLs of all agent+rescue assets in the
+// compact release payload (used by the cache warmer to pre-pull them).
+func assetBinaryURLs(payload []byte) []string {
+	var parsed struct {
+		OK     bool `json:"ok"`
+		Assets []struct {
+			URL  string `json:"url"`
+			Kind string `json:"kind"`
+		} `json:"assets"`
+	}
+	if err := json.Unmarshal(payload, &parsed); err != nil || !parsed.OK {
+		return nil
+	}
+	urls := make([]string, 0, len(parsed.Assets))
+	for _, a := range parsed.Assets {
+		if (a.Kind == "agent" || a.Kind == "rescue") && a.URL != "" {
+			urls = append(urls, a.URL)
+		}
+	}
+	return urls
+}
+
+// startBinaryWarmer keeps the release binaries hot in binCache so node
+// downloads (sys0-rescue pulling the ~6.7MB agent, operators using /dl) are
+// always served from the hub's memory instead of triggering a slow hub->GitHub
+// fetch mid-stream (the #1 cause of multi-minute downloads). It pre-warms on
+// startup and refreshes every binWarmInterval, re-pulling any asset older than
+// binWarmMaxAge. When a new release lands the asset URLs change, so stale
+// entries age out at binCacheTTL and the new ones get warmed automatically.
+// Blocking; run in its own goroutine.
+func startBinaryWarmer(log *slog.Logger) {
+	warm := func() {
+		payload, err := cachedReleasePayload()
+		if err != nil {
+			log.Warn("binary warmer: release fetch failed", "err", err)
+			return
+		}
+		urls := assetBinaryURLs(payload)
+		refreshed := 0
+		for _, u := range urls {
+			binCacheMu.Lock()
+			e, ok := binCache[u]
+			fresh := ok && time.Since(e.fetched) < binWarmMaxAge
+			binCacheMu.Unlock()
+			if fresh {
+				continue
+			}
+			if _, _, err := pullBinary(u); err != nil {
+				log.Warn("binary warmer: pull failed", "url", u, "err", err)
+				continue
+			}
+			refreshed++
+		}
+		if refreshed > 0 {
+			log.Info("binary warmer: cache refreshed", "refreshed", refreshed, "assets", len(urls))
+		}
+	}
+	warm()
+	t := time.NewTicker(binWarmInterval)
+	defer t.Stop()
+	for range t.C {
+		warm()
+	}
 }
 
 // assetFor finds the download URL AND filename of the asset with the given
