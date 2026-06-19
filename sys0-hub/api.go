@@ -66,6 +66,7 @@ func (h *Hub) Router() http.Handler {
 	auth.GET("/nodes/:id", h.apiNode)
 	auth.POST("/nodes/:id/label", h.apiNodeLabel)
 	auth.POST("/nodes/:id/detach", h.apiNodeDetach)
+	auth.POST("/nodes/:id/dismiss-rescue", h.apiNodeDismissRescue)
 	auth.DELETE("/nodes/:id", h.apiNodeDelete)
 	auth.POST("/dispatch", h.apiDispatch)
 	auth.GET("/metrics", h.apiMetrics)
@@ -235,10 +236,27 @@ func (h *Hub) apiNodeDelete(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "node online; detach first"})
 		return
 	}
+	// Always suppress any rescue report for this id so a runaway rescue can't
+	// keep the node alive as a zombie after deletion.
+	dismissRescue(id)
 	if err := h.store.DeleteNode(id); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// apiNodeDismissRescue suppresses a rescue-only (bootstrapping) zombie node:
+// a rescue process reporting from somewhere keeps the synthesized node visible
+// with a 90s TTL, so plain deletion can't clear it. Dismissing drops the report
+// and ignores further reports for that id for rescueDismissWindow.
+func (h *Hub) apiNodeDismissRescue(c *gin.Context) {
+	id := c.Param("id")
+	if !actorOf(c).nodeAllowed(id) {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
+		return
+	}
+	dismissRescue(id)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

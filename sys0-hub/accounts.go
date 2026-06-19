@@ -369,9 +369,42 @@ type rescueInfo struct {
 var (
 	rescueMu      sync.Mutex
 	rescueReports = map[string]rescueInfo{}
+	// rescueDismissed holds node ids an operator has explicitly dismissed,
+	// mapped to the time the dismissal expires. A runaway rescue elsewhere can
+	// keep POSTing /rescue/report forever; without this, the synthesized
+	// bootstrapping node is impossible to clear (deleting the map entry just
+	// gets recreated on the next 30s report). While dismissed, incoming reports
+	// for that id are dropped and the node is hidden.
+	rescueDismissed = map[string]time.Time{}
 )
 
 const rescueTTL = 90 * time.Second
+
+// rescueDismissWindow is how long a dismissal suppresses a node id. Long enough
+// to outlast a runaway reporter the operator is going to hunt down/kill.
+const rescueDismissWindow = 30 * time.Minute
+
+// rescueIsDismissed reports whether a node id is currently suppressed.
+// Caller must hold rescueMu.
+func rescueIsDismissed(nodeID string) bool {
+	until, ok := rescueDismissed[nodeID]
+	if !ok {
+		return false
+	}
+	if time.Now().After(until) {
+		delete(rescueDismissed, nodeID)
+		return false
+	}
+	return true
+}
+
+// dismissRescue suppresses a rescue-only node id and forgets its last report.
+func dismissRescue(nodeID string) {
+	rescueMu.Lock()
+	defer rescueMu.Unlock()
+	rescueDismissed[nodeID] = time.Now().Add(rescueDismissWindow)
+	delete(rescueReports, nodeID)
+}
 
 // rescueView is the live rescue status surfaced on a NodeView.
 type rescueView struct {
@@ -391,6 +424,9 @@ type rescueView struct {
 func rescueStatus(nodeID string) rescueView {
 	rescueMu.Lock()
 	defer rescueMu.Unlock()
+	if rescueIsDismissed(nodeID) {
+		return rescueView{}
+	}
 	info, ok := rescueReports[nodeID]
 	if !ok || time.Since(info.lastSeen) > rescueTTL {
 		return rescueView{}
@@ -418,6 +454,9 @@ func liveRescueNodes() map[string]rescueView {
 	out := map[string]rescueView{}
 	for id, info := range rescueReports {
 		if time.Since(info.lastSeen) > rescueTTL {
+			continue
+		}
+		if rescueIsDismissed(id) {
 			continue
 		}
 		out[id] = rescueView{
@@ -475,6 +514,13 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 	nodeID := "n" + body.Fingerprint[:6]
 	now := time.Now()
 	rescueMu.Lock()
+	if rescueIsDismissed(nodeID) {
+		// Operator dismissed this (likely a runaway/zombie rescue). Ack so the
+		// reporter doesn't error-loop, but don't resurrect the node.
+		rescueMu.Unlock()
+		c.JSON(http.StatusOK, gin.H{"ok": true, "dismissed": true})
+		return
+	}
 	prev, existed := rescueReports[nodeID]
 	first := now
 	if existed && time.Since(prev.lastSeen) <= rescueTTL && !prev.firstSeen.IsZero() {

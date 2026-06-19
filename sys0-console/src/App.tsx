@@ -263,6 +263,12 @@ function NodeCard({
     if (!r.ok) await alertDialog(r.error || "失败", { title: "删除失败" });
     onChanged();
   };
+  const dismiss = async () => {
+    if (!(await confirmDialog(`清除引导中节点 ${n.id}?\n（某处的 rescue 仍在上报会让它出现;清除后将忽略其上报 30 分钟。若是失控进程,记得在该机器上停掉它。）`, { title: "清除僵尸节点", danger: true }))) return;
+    const r = await api.dismissRescue(n.id);
+    if (!r.ok) await alertDialog(r.error || "失败", { title: "清除失败" });
+    onChanged();
+  };
 
   const offline = n.state === "offline";
   const bootstrapping = n.state === "bootstrapping";
@@ -300,7 +306,9 @@ function NodeCard({
         <div className="mono-sm mt-1">上次在线 {new Date(n.lastSeen * 1000).toLocaleString()}</div>
       )}
       <div className="flex flex-wrap gap-1 mt-2">
-        {!offline ? (
+        {bootstrapping ? (
+          <button className="btn" style={{ padding: "2px 7px", color: "var(--danger)" }} onClick={dismiss}>清除</button>
+        ) : !offline ? (
           <>
             <button className="btn" style={{ padding: "2px 7px" }} onClick={showInfo}>ⓘ</button>
             <button className="btn" style={{ padding: "2px 7px" }} onClick={rename}>✎</button>

@@ -161,6 +161,7 @@ export const api = {
     req<{ ok: boolean }>("POST", `/api/v1/nodes/${id}/label`, { label, tags }),
   detach: (id: string) => req<{ ok: boolean }>("POST", `/api/v1/nodes/${id}/detach`, {}),
   deleteNode: (id: string) => req<{ ok: boolean; error?: string }>("DELETE", `/api/v1/nodes/${id}`),
+  dismissRescue: (id: string) => req<{ ok: boolean; error?: string }>("POST", `/api/v1/nodes/${id}/dismiss-rescue`, {}),
   keysList: () => req<{ ok: boolean; keys: any[] }>("GET", "/api/v1/keys"),
   keyCreate: (body: any) =>
     req<{ ok: boolean; key?: string; id?: string; error?: string }>("POST", "/api/v1/keys", body),
