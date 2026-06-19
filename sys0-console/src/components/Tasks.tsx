@@ -43,22 +43,30 @@ export function Tasks({ node }: { node: string }) {
     });
     const f = new FitAddon();
     t.loadAddon(f);
-    t.open(termHost.current!);
-    f.fit();
+    // Defer open one tick so the window/container is laid out & measurable —
+    // opening into a zero-size container leaves xterm's input textarea
+    // mis-positioned and it never captures keystrokes (you see output but can't
+    // type). Mirrors the Shell window's deferred attach.
+    const openTimer = setTimeout(() => {
+      if (!termHost.current) return;
+      t.open(termHost.current);
+      f.fit();
+      t.focus();
+    }, 0);
     t.onData((d) => {
       const id = selRef.current;
       if (!id || !ws.current) return;
       ws.current.call("dispatch", {
         select: { nodes: [node] },
         call: { method: "task.input", params: { task: id, data: b64encode(new TextEncoder().encode(d)) } },
-      });
+      }).catch(() => {});
     });
     term.current = t;
     fit.current = f;
     const ro = new ResizeObserver(() => fitTerm());
     if (termHost.current) ro.observe(termHost.current);
     window.addEventListener("resize", fitTerm);
-    return () => { ro.disconnect(); window.removeEventListener("resize", fitTerm); t.dispose(); };
+    return () => { clearTimeout(openTimer); ro.disconnect(); window.removeEventListener("resize", fitTerm); t.dispose(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -162,7 +170,8 @@ export function Tasks({ node }: { node: string }) {
           {current && <button className="btn" onClick={() => manage("task.restart", { task: current.id }).then(() => selectTask(current.id))}>重启</button>}
           {current && <button className="btn" style={{ color: "var(--danger)" }} onClick={() => remove(current.id)}>移除</button>}
         </div>
-        <div className="panel" style={{ flex: 1, padding: 8, minHeight: 0 }}>
+        <div className="panel" style={{ flex: 1, padding: 8, minHeight: 0 }}
+          onMouseDown={() => term.current?.focus()}>
           <div ref={termHost} style={{ height: "100%", width: "100%" }} />
         </div>
         <div className="mono-sm">点击上方终端可直接交互（stdin 透传到进程，支持 ANSI / TUI）</div>
