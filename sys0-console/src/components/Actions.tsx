@@ -2,8 +2,9 @@ import { useEffect, useState } from "react";
 import { api, type MethodSpec, type DispatchItem } from "../api";
 
 // Generic, self-describing action runner: pick any (non-interactive) method,
-// fill a form generated from its JSON Schema, target the working set, run.
-export function Actions({ targets, allCount }: { targets: string[]; allCount: number }) {
+// fill a form generated from its JSON Schema, run it on the FOCUSED node.
+// Node is fixed by the workspace — no batch / all-nodes targeting.
+export function Actions({ node }: { node: string }) {
   const [methods, setMethods] = useState<MethodSpec[]>([]);
   const [sel, setSel] = useState<string>("");
   const [form, setForm] = useState<Record<string, any>>({});
@@ -39,15 +40,13 @@ export function Actions({ targets, allCount }: { targets: string[]; allCount: nu
       params[k] = t === "integer" ? parseInt(raw) : t === "boolean" ? !!raw :
         t === "array" ? String(raw).split(",").map((s) => s.trim()).filter(Boolean) : raw;
     }
-    const select = targets.length > 0 ? { nodes: targets } : { all: true };
     try {
-      const r = await api.dispatch(select, sel, params, dry);
+      const r = await api.dispatch({ nodes: [node] }, sel, params, dry);
       if (r.ok) setItems(r.items || []);
       else setErr(`${r.error} (code ${r.code})`);
     } catch (e) { setErr(String(e)); } finally { setBusy(false); }
   };
 
-  const count = targets.length || allCount;
   return (
     <div className="flex flex-col gap-3 h-full">
       <div className="flex gap-2 items-center flex-wrap">
@@ -58,7 +57,7 @@ export function Actions({ targets, allCount }: { targets: string[]; allCount: nu
         <label className="flex items-center gap-1 cursor-pointer mono-sm">
           <input type="checkbox" checked={dry} onChange={(e) => setDry(e.target.checked)} /> dryRun
         </label>
-        <button className="btn btn-accent" disabled={busy || !sel} onClick={run}>执行 · {count}</button>
+        <button className="btn btn-accent" disabled={busy || !sel} onClick={run}>执行 · {node}</button>
       </div>
       {spec && <div className="mono-sm" style={{ color: "var(--muted)" }}>{spec.description}</div>}
 

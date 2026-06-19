@@ -1,15 +1,13 @@
 import { useEffect, useState } from "react";
-import { api, b64encode, b64decode, type Node } from "../api";
+import { api, b64encode, b64decode } from "../api";
 import { confirmDialog, alertDialog } from "./dialogs";
 
-export function Files({ nodes, primary }: { nodes: Node[]; primary: string }) {
-  const [node, setNode] = useState(primary);
+// File browser for the FOCUSED node. Node is fixed by the workspace.
+export function Files({ node }: { node: string }) {
   const [path, setPath] = useState("/");
   const [entries, setEntries] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-
-  useEffect(() => setNode(primary || nodes[0]?.id || ""), [primary, nodes.length]);
 
   const ls = async (p: string) => {
     if (!node) return;
@@ -51,9 +49,6 @@ export function Files({ nodes, primary }: { nodes: Node[]; primary: string }) {
   return (
     <div className="flex flex-col gap-3 h-full">
       <div className="flex gap-2 items-center flex-wrap">
-        <select className="input" style={{ width: 180 }} value={node} onChange={(e) => setNode(e.target.value)}>
-          {nodes.map((n) => <option key={n.id} value={n.id}>{n.label}</option>)}
-        </select>
         <input className="input" style={{ flex: 1, minWidth: 200 }} value={path}
           onChange={(e) => setPath(e.target.value)} onKeyDown={(e) => e.key === "Enter" && ls(path)} />
         <button className="btn" onClick={() => ls(path)} disabled={busy}>转到</button>

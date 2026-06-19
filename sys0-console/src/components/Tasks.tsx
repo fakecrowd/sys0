@@ -2,15 +2,15 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { api, b64encode, b64decode, type Node } from "../api";
+import { api, b64encode, b64decode } from "../api";
 import { WSClient } from "../ws";
 import { confirmDialog } from "./dialogs";
 
-// Managed processes: launch & supervise long-running child processes on a node.
-// Output is a real PTY rendered with xterm (ANSI colors), fully interactive,
-// with history for both running and past (exited) processes.
-export function Tasks({ nodes, primary }: { nodes: Node[]; primary: string }) {
-  const [node, setNode] = useState(primary);
+// Managed processes: launch & supervise long-running child processes on the
+// FOCUSED node. Output is a real PTY rendered with xterm (ANSI colors), fully
+// interactive, with history for both running and past (exited) processes.
+// The node is fixed by the workspace — no in-window node picker.
+export function Tasks({ node }: { node: string }) {
   const [tasks, setTasks] = useState<any[]>([]);
   const [sel, setSel] = useState<string>("");
   const [name, setName] = useState("");
@@ -23,9 +23,7 @@ export function Tasks({ nodes, primary }: { nodes: Node[]; primary: string }) {
   const selRef = useRef(sel);
   useEffect(() => { selRef.current = sel; }, [sel]);
 
-  useEffect(() => setNode(primary || nodes[0]?.id || ""), [primary, nodes.length]);
-
-  // one xterm + one WS for the whole tab
+  // one xterm + one WS for the whole window
   useEffect(() => {
     const t = new XTerm({
       fontFamily: '"JetBrains Mono", monospace', fontSize: 13,
@@ -40,7 +38,7 @@ export function Tasks({ nodes, primary }: { nodes: Node[]; primary: string }) {
       const id = selRef.current;
       if (!id || !ws.current) return;
       ws.current.call("dispatch", {
-        select: { nodes: [nodeRef.current] },
+        select: { nodes: [node] },
         call: { method: "task.input", params: { task: id, data: b64encode(new TextEncoder().encode(d)) } },
       });
     });
@@ -49,29 +47,27 @@ export function Tasks({ nodes, primary }: { nodes: Node[]; primary: string }) {
     const onResize = () => {
       f.fit();
       if (selRef.current && ws.current)
-        ws.current.call("dispatch", { select: { nodes: [nodeRef.current] }, call: { method: "task.resize", params: { task: selRef.current, cols: t.cols, rows: t.rows } } });
+        ws.current.call("dispatch", { select: { nodes: [node] }, call: { method: "task.resize", params: { task: selRef.current, cols: t.cols, rows: t.rows } } });
     };
     window.addEventListener("resize", onResize);
     return () => { window.removeEventListener("resize", onResize); t.dispose(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const nodeRef = useRef(node);
-  useEffect(() => { nodeRef.current = node; }, [node]);
-
-  // (re)connect WS per node, subscribe task stream
+  // connect WS once, subscribe task stream
   useEffect(() => {
     const c = new WSClient();
     c.connect();
     c.call("hub.subscribe", { topics: ["task"] });
     c.on("event.task", (p: any) => {
-      if (p.node !== nodeRef.current || p.task !== selRef.current) return;
+      if (p.node !== node || p.task !== selRef.current) return;
       if (p.chunk) term.current?.write(b64decode(p.chunk));
       if (p.exited) { term.current?.write(`\r\n\x1b[33m[exited code ${p.code}]\x1b[0m\r\n`); refresh(); }
     });
     ws.current = c;
     return () => c.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node]);
+  }, []);
 
   const refresh = useCallback(async () => {
     if (!node) return;
@@ -120,9 +116,6 @@ export function Tasks({ nodes, primary }: { nodes: Node[]; primary: string }) {
   return (
     <div className="task-split flex gap-3 h-full min-h-0">
       <div className="task-aside w-[280px] flex flex-col gap-2 min-h-0">
-        <select className="input" value={node} onChange={(e) => setNode(e.target.value)}>
-          {nodes.filter((n) => n.state !== "offline").map((n) => <option key={n.id} value={n.id}>{n.label} · {n.id}</option>)}
-        </select>
         <div className="panel p-2 space-y-2">
           <input className="input" placeholder="任务名 (可选)" value={name} onChange={(e) => setName(e.target.value)} />
           <input className="input" placeholder="命令，如 top / ping 1.1.1.1" value={cmd}

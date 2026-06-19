@@ -3,19 +3,19 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { WSClient } from "../ws";
-import { b64encode, b64decode, type Node } from "../api";
+import { b64encode, b64decode } from "../api";
 
 type ShellInfo = {
   session: string; name: string; shell: string;
   state: string; exit: number; cols: number; rows: number; started: number;
 };
 
-// Interactive PTY shells managed on the agent. Shells are persistent: they live
+// Interactive PTY shells on the FOCUSED node. Shells are persistent: they live
 // on the node across console (re)connects, so reconnecting reattaches to the
 // existing sessions (with scrollback replay) instead of forcing a new one.
-// Multiple shells per node are supported via the tab bar.
-export function Shell({ nodes, primary }: { nodes: Node[]; primary: string }) {
-  const [node, setNode] = useState(primary);
+// Multiple shells per node are supported via the tab bar. The node is fixed by
+// the workspace — there is no in-window node picker.
+export function Shell({ node }: { node: string }) {
   const [connected, setConnected] = useState(false);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [active, setActive] = useState<string>("");
@@ -28,8 +28,6 @@ export function Shell({ nodes, primary }: { nodes: Node[]; primary: string }) {
     node: string;
   }>({ terms: new Map(), node: "" });
 
-  useEffect(() => setNode(primary || nodes[0]?.id || ""), [primary, nodes.length]);
-
   const dispatch = useCallback((method: string, params: any) => {
     const s = st.current;
     if (!s.ws) return Promise.reject("no ws");
@@ -38,13 +36,12 @@ export function Shell({ nodes, primary }: { nodes: Node[]; primary: string }) {
 
   // Connect: open ws, subscribe, list existing shells, attach to the first
   // (or spawn one if the node has none).
-  const connect = async (target?: string) => {
-    const nid = target || node;
-    if (!nid) return;
+  const connect = async () => {
+    if (!node) return;
     const ws = new WSClient();
     ws.connect();
     await ws.call("hub.subscribe", { topics: ["shell"] });
-    st.current = { ws, terms: new Map(), node: nid };
+    st.current = { ws, terms: new Map(), node };
 
     // Route all live shell output to the matching terminal.
     ws.on("event.shell", (p: any) => {
@@ -149,18 +146,6 @@ export function Shell({ nodes, primary }: { nodes: Node[]; primary: string }) {
     if (termRef.current) termRef.current.innerHTML = "";
   };
 
-  // Switch to another node while connected: tear down the current console
-  // connection (shells stay alive on the previous agent) and reconnect to the
-  // newly selected node, reattaching to its existing sessions.
-  const switchNode = async (next: string) => {
-    st.current.terms.forEach((e) => e.term.dispose());
-    st.current.ws?.close();
-    st.current = { terms: new Map(), node: next };
-    setShells([]); setActive("");
-    if (termRef.current) termRef.current.innerHTML = "";
-    await connect(next);
-  };
-
   useEffect(() => {
     const onResize = () => {
       const e = st.current.terms.get(active);
@@ -176,12 +161,8 @@ export function Shell({ nodes, primary }: { nodes: Node[]; primary: string }) {
     <div className="flex flex-col gap-2 h-full">
       <div className="flex gap-2 items-center flex-wrap">
         <span className="mono-sm">交互 Shell（agent 侧常驻 · 可复用/多开）·</span>
-        <select className="input" style={{ width: 200 }} value={node}
-          onChange={(e) => { const next = e.target.value; setNode(next); if (connected && next !== st.current.node) switchNode(next); }}>
-          {nodes.map((n) => <option key={n.id} value={n.id}>{n.label} · {n.id}</option>)}
-        </select>
         {!connected
-          ? <button className="btn btn-accent" disabled={!node} onClick={() => connect()}>连接</button>
+          ? <button className="btn btn-accent" disabled={!node} onClick={connect}>连接</button>
           : <button className="btn" style={{ color: "var(--danger)" }} onClick={disconnect}>断开（保留会话）</button>}
         <span className="mono-sm">{connected ? "● 已连接" : "○ 未连接"}</span>
       </div>

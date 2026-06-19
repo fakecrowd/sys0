@@ -20,8 +20,11 @@ type WinState = {
   px?: number; py?: number; pw?: number; ph?: number;
 };
 
-const LAYOUT_KEY = "sys0_winlayout_v1";
-const MOBILE_TAB_KEY = "sys0_mobiletab";
+// Layout + active tab are persisted PER WORKSPACE (per focused node), so every
+// node keeps its own window arrangement — like a macOS Space. The workspaceKey
+// (the node id) is folded into the storage key.
+const LAYOUT_PREFIX = "sys0_winlayout_v2:";
+const MOBILE_TAB_PREFIX = "sys0_mobiletab:";
 
 function useIsMobile(breakpoint = 768) {
   const [m, setM] = useState(() => window.innerWidth <= breakpoint);
@@ -33,14 +36,14 @@ function useIsMobile(breakpoint = 768) {
   return m;
 }
 
-function loadLayout(): Record<string, Partial<WinState>> {
-  try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) || "{}") || {}; }
+function loadLayout(ws: string): Record<string, Partial<WinState>> {
+  try { return JSON.parse(localStorage.getItem(LAYOUT_PREFIX + ws) || "{}") || {}; }
   catch { return {}; }
 }
-function saveLayout(wins: WinState[]) {
+function saveLayout(ws: string, wins: WinState[]) {
   const o: Record<string, Partial<WinState>> = {};
   for (const w of wins) o[w.key] = { x: w.x, y: w.y, w: w.w, h: w.h, open: w.open, min: w.min, max: w.max };
-  try { localStorage.setItem(LAYOUT_KEY, JSON.stringify(o)); } catch { /* ignore */ }
+  try { localStorage.setItem(LAYOUT_PREFIX + ws, JSON.stringify(o)); } catch { /* ignore */ }
 }
 
 // Cascade default positions so freshly-opened windows don't perfectly overlap.
@@ -49,12 +52,12 @@ function defaultGeom(i: number): { x: number; y: number; w: number; h: number } 
   return { x: 40 + offset, y: 24 + offset, w: 760, h: 520 };
 }
 
-export function WindowManager({ apps }: { apps: WinApp[] }) {
+export function WindowManager({ workspaceKey, apps }: { workspaceKey: string; apps: WinApp[] }) {
   const isMobile = useIsMobile();
 
-  // ---- desktop window state ----
+  // ---- desktop window state (scoped to this workspace) ----
   const [wins, setWins] = useState<WinState[]>(() => {
-    const saved = loadLayout();
+    const saved = loadLayout(workspaceKey);
     return apps.map((a, i) => {
       const g = defaultGeom(i);
       const s = saved[a.key] || {};
@@ -62,7 +65,7 @@ export function WindowManager({ apps }: { apps: WinApp[] }) {
         key: a.key,
         x: s.x ?? g.x, y: s.y ?? g.y, w: s.w ?? g.w, h: s.h ?? g.h,
         z: i + 1,
-        open: s.open ?? (i === 0), // first app open by default on a fresh session
+        open: s.open ?? (i === 0), // first app open by default on a fresh workspace
         min: s.min ?? false,
         max: s.max ?? false,
       };
@@ -70,7 +73,7 @@ export function WindowManager({ apps }: { apps: WinApp[] }) {
   });
   const topZ = useRef(apps.length + 1);
 
-  useEffect(() => { saveLayout(wins); }, [wins]);
+  useEffect(() => { saveLayout(workspaceKey, wins); }, [workspaceKey, wins]);
 
   const byKey = (k: string) => wins.find((w) => w.key === k)!;
 
@@ -110,8 +113,8 @@ export function WindowManager({ apps }: { apps: WinApp[] }) {
   };
 
   // ---------------- MOBILE: paged tab view ----------------
-  const [mtab, setMtab] = useState<string>(() => localStorage.getItem(MOBILE_TAB_KEY) || apps[0]?.key || "");
-  useEffect(() => { if (mtab) localStorage.setItem(MOBILE_TAB_KEY, mtab); }, [mtab]);
+  const [mtab, setMtab] = useState<string>(() => localStorage.getItem(MOBILE_TAB_PREFIX + workspaceKey) || apps[0]?.key || "");
+  useEffect(() => { if (mtab) localStorage.setItem(MOBILE_TAB_PREFIX + workspaceKey, mtab); }, [workspaceKey, mtab]);
 
   if (isMobile) {
     const active = apps.find((a) => a.key === mtab) || apps[0];

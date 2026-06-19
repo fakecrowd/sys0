@@ -96,7 +96,9 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
 
 function Console({ onLogout }: { onLogout: () => void }) {
   const [nodes, setNodes] = useState<Node[]>([]);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Single-focus model (macOS-workspace style): exactly one node is focused at
+  // a time; the right-hand content area is its workspace. "" = nothing focused.
+  const [focused, setFocused] = useState<string>("");
   const [live, setLive] = useState<Record<string, any>>({});
   const [navOpen, setNavOpen] = useState(false); // mobile node drawer
   const isAdmin = getRole() === "admin";
@@ -115,27 +117,34 @@ function Console({ onLogout }: { onLogout: () => void }) {
     return () => { es.close(); clearInterval(t); };
   }, [refresh]);
 
-  const toggle = (id: string) =>
-    setSelected((s) => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  // If the focused node disappears (deleted / forgotten), drop focus so the
+  // workspace collapses back to the empty state rather than dangling.
+  useEffect(() => {
+    if (focused && !nodes.some((n) => n.id === focused)) setFocused("");
+  }, [nodes, focused]);
 
-  const targets = [...selected].filter((id) => nodes.some((n) => n.id === id));
-  const primary = targets[0] || nodes[0]?.id || "";
+  const select = (id: string) => {
+    setFocused(id);
+    setNavOpen(false); // reveal the workspace (closes the mobile drawer)
+  };
 
-  // Each console surface is a window (desktop) / page (mobile). Admin-only
-  // surfaces are appended conditionally so non-admins never see them.
-  const apps: WinApp[] = [
-    { key: "shell", title: "Shell", render: () => <Shell nodes={nodes} primary={primary} /> },
-    { key: "tasks", title: "任务", render: () => <Tasks nodes={nodes} primary={primary} /> },
-    { key: "proc", title: "进程", render: () => <Processes nodes={nodes} primary={primary} /> },
-    { key: "files", title: "文件", render: () => <Files nodes={nodes} primary={primary} /> },
-    { key: "monitor", title: "监控", render: () => <Monitor targets={targets} live={live} /> },
-    { key: "actions", title: "动作", render: () => <Actions targets={targets} allCount={nodes.length} /> },
+  const focusedNode = nodes.find((n) => n.id === focused);
+
+  // Every console surface is a window bound to the FOCUSED node — no in-window
+  // node picker, no batch targeting. Admin-only surfaces append conditionally.
+  const apps: WinApp[] = focused ? [
+    { key: "shell", title: "Shell", render: () => <Shell node={focused} /> },
+    { key: "tasks", title: "任务", render: () => <Tasks node={focused} /> },
+    { key: "proc", title: "进程", render: () => <Processes node={focused} /> },
+    { key: "files", title: "文件", render: () => <Files node={focused} /> },
+    { key: "monitor", title: "监控", render: () => <Monitor node={focused} live={live} /> },
+    { key: "actions", title: "动作", render: () => <Actions node={focused} /> },
     { key: "audit", title: "审计", render: () => <Audit /> },
     ...(isAdmin ? [
       { key: "keys", title: "密钥", render: () => <Keys /> },
       { key: "accounts", title: "账户", render: () => <Accounts nodes={nodes} meName={getUser()} /> },
     ] as WinApp[] : []),
-  ];
+  ] : [];
 
   return (
     <div className="h-full flex flex-col">
@@ -148,7 +157,9 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <span className="mono-sm hide-sm">/ console</span>
         </div>
         <div className="flex items-center gap-3 min-w-0">
-          <span className="mono-sm truncate">{nodes.filter((n) => n.state === "online").length} online · {targets.length} sel · {getRole()}</span>
+          <span className="mono-sm truncate">
+            {nodes.filter((n) => n.state === "online").length} online · {focusedNode ? `▸ ${focusedNode.label}` : "未聚焦"} · {getRole()}
+          </span>
           <button className="btn" onClick={onLogout}>退出</button>
         </div>
       </header>
@@ -156,10 +167,18 @@ function Console({ onLogout }: { onLogout: () => void }) {
       <div className="flex-1 flex min-h-0 relative">
         {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} />}
         <div className={navOpen ? "node-drawer open" : "node-drawer"}>
-          <NodeList nodes={nodes} selected={selected} toggle={toggle} live={live} onRefresh={refresh} />
+          <NodeList nodes={nodes} focused={focused} onSelect={select} live={live} onRefresh={refresh} />
         </div>
         <main className="flex-1 flex flex-col min-w-0">
-          <WindowManager apps={apps} />
+          {focused
+            ? <WindowManager key={focused} workspaceKey={focused} apps={apps} />
+            : <div className="flex-1 flex items-center justify-center px-6" style={{ color: "var(--muted)" }}>
+                <div style={{ textAlign: "center", lineHeight: 1.7 }}>
+                  <div className="text-lg" style={{ color: "var(--fg)", opacity: 0.8 }}>未聚焦任何节点</div>
+                  <div className="mono-sm mt-1">在左侧选择一个节点，打开它的专属工作区</div>
+                  <div className="mono-sm mt-1" style={{ opacity: 0.6 }}>窗口布局、位置、大小与内容均与该节点绑定</div>
+                </div>
+              </div>}
         </main>
       </div>
     </div>
@@ -199,9 +218,9 @@ function sortNodes(nodes: Node[], live: Record<string, any>, field: SortField, d
 }
 
 function NodeList({
-  nodes, selected, toggle, live, onRefresh,
+  nodes, focused, onSelect, live, onRefresh,
 }: {
-  nodes: Node[]; selected: Set<string>; toggle: (id: string) => void;
+  nodes: Node[]; focused: string; onSelect: (id: string) => void;
   live: Record<string, any>; onRefresh: () => void;
 }) {
   const [sort, setSort] = useState(loadSort);
@@ -214,7 +233,7 @@ function NodeList({
   return (
     <aside className="w-full h-full flex flex-col" style={{ borderRight: "1px solid var(--border)" }}>
       <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
-        <span className="mono-sm">NODES · 工作集</span>
+        <span className="mono-sm">NODES · 聚焦工作区</span>
         <button className="btn" onClick={onRefresh}>↻</button>
       </div>
       <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
@@ -231,7 +250,7 @@ function NodeList({
       <div className="flex-1 overflow-auto p-2 space-y-2">
         {ordered.length === 0 && <div className="mono-sm px-2 py-4">无在线节点</div>}
         {ordered.map((n) => (
-          <NodeCard key={n.id} n={n} on={selected.has(n.id)} toggle={toggle} m={live[n.id]} onChanged={onRefresh} />
+          <NodeCard key={n.id} n={n} on={focused === n.id} onSelect={onSelect} m={live[n.id]} onChanged={onRefresh} />
         ))}
       </div>
     </aside>
@@ -239,8 +258,8 @@ function NodeList({
 }
 
 function NodeCard({
-  n, on, toggle, m, onChanged,
-}: { n: Node; on: boolean; toggle: (id: string) => void; m: any; onChanged: () => void }) {
+  n, on, onSelect, m, onChanged,
+}: { n: Node; on: boolean; onSelect: (id: string) => void; m: any; onChanged: () => void }) {
   const [open, setOpen] = useState(false);
   const [info, setInfo] = useState<any>(null);
   const [rescueOpen, setRescueOpen] = useState(n.state === "bootstrapping");
@@ -277,9 +296,10 @@ function NodeCard({
   return (
     <div className="panel p-2.5" style={{ ...(on ? { borderColor: "var(--accent)" } : {}), ...(offline ? { opacity: 0.55 } : {}) }}>
       <div className={selectable ? "flex items-center gap-2 cursor-pointer" : "flex items-center gap-2"}
-        onClick={() => selectable && toggle(n.id)}>
+        onClick={() => selectable && onSelect(n.id)}>
         <span className="dot" style={{ background: offline ? "var(--muted)" : bootstrapping ? "var(--warn)" : "var(--accent)" }} />
         <span style={{ color: on ? "var(--accent)" : "var(--fg)" }}>{n.label}</span>
+        {on && <span className="tag" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>聚焦</span>}
         {offline && <span className="tag" style={{ color: "var(--muted)" }}>offline</span>}
         {bootstrapping && <span className="tag" style={{ color: "var(--warn)", borderColor: "var(--warn)" }}>引导中</span>}
         {n.rescue && (
