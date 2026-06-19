@@ -321,7 +321,7 @@ function NodeCard({
       <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
         agent {n.version || "—"}{n.rescue ? ` · rescue ${n.rescueVersion || "?"}` : ""}
       </div>
-      {n.rescue && rescueOpen && <RescueDetail nodeId={n.id} live={n.state !== "offline"} r={n.rescueInfo} fallbackVer={n.rescueVersion} onChanged={onChanged} />}
+      {n.rescue && rescueOpen && <RescueDetail nodeId={n.id} r={n.rescueInfo} fallbackVer={n.rescueVersion} onChanged={onChanged} />}
       {m && !offline && (
         <div className="mono-sm mt-1">
           cpu {m.cpuPct?.toFixed?.(1)}% · mem {((m.memUsed / m.memTotal) * 100).toFixed(0)}% · load {m.load1}
@@ -385,8 +385,8 @@ const CMD_STATUS: Record<string, { label: string; color: string }> = {
   error: { label: "失败", color: "var(--danger)" },
 };
 
-function RescueDetail({ nodeId, live, r, fallbackVer, onChanged }: {
-  nodeId: string; live: boolean; r?: RescueInfo | null; fallbackVer?: string; onChanged: () => void;
+function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
+  nodeId: string; r?: RescueInfo | null; fallbackVer?: string; onChanged: () => void;
 }) {
   // r may be absent if the node view predates the richer payload; show a
   // minimal card from whatever we have.
@@ -432,9 +432,9 @@ function RescueDetail({ nodeId, live, r, fallbackVer, onChanged }: {
 
       {r?.live && (
         <div className="flex flex-wrap gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
-          <button className="btn" style={{ padding: "2px 8px" }} disabled={!live}
+          <button className="btn" style={{ padding: "2px 8px" }}
             title="让 rescue 重新从 hub 下载最新 agent 并重启" onClick={() => sendCmd("update-agent")}>更新 agent</button>
-          <button className="btn" style={{ padding: "2px 8px" }} disabled={!live}
+          <button className="btn" style={{ padding: "2px 8px" }}
             title="重启被守护的 agent（不重新下载）" onClick={() => sendCmd("restart-agent")}>重启 agent</button>
         </div>
       )}

