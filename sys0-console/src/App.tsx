@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, rememberCreds, forgetCreds, hasRemembered, getRememberedUser, type Node, type RescueInfo } from "./api";
+import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, rememberCreds, forgetCreds, hasRemembered, getRememberedUser, type Node, type RescueInfo, type RescueCommand } from "./api";
 import { Shell } from "./components/Shell";
 import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
@@ -321,7 +321,7 @@ function NodeCard({
       <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
         agent {n.version || "—"}{n.rescue ? ` · rescue ${n.rescueVersion || "?"}` : ""}
       </div>
-      {n.rescue && rescueOpen && <RescueDetail r={n.rescueInfo} fallbackVer={n.rescueVersion} />}
+      {n.rescue && rescueOpen && <RescueDetail nodeId={n.id} live={n.state !== "offline"} r={n.rescueInfo} fallbackVer={n.rescueVersion} onChanged={onChanged} />}
       {m && !offline && (
         <div className="mono-sm mt-1">
           cpu {m.cpuPct?.toFixed?.(1)}% · mem {((m.memUsed / m.memTotal) * 100).toFixed(0)}% · load {m.load1}
@@ -373,7 +373,21 @@ function fmtDur(sec: number): string {
   return `${Math.floor(sec / 3600)}h${Math.floor((sec % 3600) / 60)}m`;
 }
 
-function RescueDetail({ r, fallbackVer }: { r?: RescueInfo | null; fallbackVer?: string }) {
+const CMD_LABEL: Record<string, string> = {
+  "update-agent": "更新 agent",
+  "restart-agent": "重启 agent",
+};
+const CMD_STATUS: Record<string, { label: string; color: string }> = {
+  pending: { label: "待执行", color: "var(--warn)" },
+  acked: { label: "已下发", color: "var(--warn)" },
+  running: { label: "执行中", color: "var(--accent-2)" },
+  done: { label: "完成", color: "var(--accent)" },
+  error: { label: "失败", color: "var(--danger)" },
+};
+
+function RescueDetail({ nodeId, live, r, fallbackVer, onChanged }: {
+  nodeId: string; live: boolean; r?: RescueInfo | null; fallbackVer?: string; onChanged: () => void;
+}) {
   // r may be absent if the node view predates the richer payload; show a
   // minimal card from whatever we have.
   const phase = r?.status || "supervising";
@@ -389,6 +403,20 @@ function RescueDetail({ r, fallbackVer }: { r?: RescueInfo | null; fallbackVer?:
     rows.push(["守护时长", fmtDur(r.sinceSec)]);
     rows.push(["最近上报", `${r.ageSec}s 前`]);
   }
+
+  const sendCmd = async (kind: string) => {
+    const label = CMD_LABEL[kind] || kind;
+    if (!(await confirmDialog(`向 ${nodeId} 的 rescue 下发「${label}」?
+（rescue 每 ~30s 轮询一次,命令将在下次轮询时执行）`, { title: label }))) return;
+    const res = await api.rescueCommand(nodeId, kind);
+    if (!res.ok) await alertDialog(res.error || "失败", { title: "下发失败" });
+    onChanged();
+  };
+
+  // Active (non-terminal) commands shown newest-first; terminal ones too but
+  // de-emphasised. Only show controls when the rescue is actually live.
+  const cmds: RescueCommand[] = (r?.commands || []).slice().reverse();
+
   return (
     <div className="mono-sm mt-1.5 p-2" style={{ background: "#0b1013", border: "1px solid var(--border)", borderRadius: 6 }}>
       <div className="flex items-center gap-2 mb-1">
@@ -401,6 +429,31 @@ function RescueDetail({ r, fallbackVer }: { r?: RescueInfo | null; fallbackVer?:
           <span style={{ wordBreak: "break-all" }}>{v}</span>
         </div>
       ))}
+
+      {r?.live && (
+        <div className="flex flex-wrap gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
+          <button className="btn" style={{ padding: "2px 8px" }} disabled={!live}
+            title="让 rescue 重新从 hub 下载最新 agent 并重启" onClick={() => sendCmd("update-agent")}>更新 agent</button>
+          <button className="btn" style={{ padding: "2px 8px" }} disabled={!live}
+            title="重启被守护的 agent（不重新下载）" onClick={() => sendCmd("restart-agent")}>重启 agent</button>
+        </div>
+      )}
+
+      {cmds.length > 0 && (
+        <div className="mt-2" style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+          <div style={{ color: "var(--muted)", marginBottom: 3 }}>操作记录</div>
+          {cmds.slice(0, 5).map((c) => {
+            const st = CMD_STATUS[c.status] || { label: c.status, color: "var(--muted)" };
+            return (
+              <div key={c.id} className="flex gap-2" style={{ lineHeight: 1.5 }}>
+                <span style={{ minWidth: 64, flexShrink: 0 }}>{CMD_LABEL[c.kind] || c.kind}</span>
+                <span style={{ color: st.color, minWidth: 44, flexShrink: 0 }}>{st.label}</span>
+                <span style={{ color: "var(--muted)", wordBreak: "break-all" }}>{c.detail}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

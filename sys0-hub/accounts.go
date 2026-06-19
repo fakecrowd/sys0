@@ -408,15 +408,16 @@ func dismissRescue(nodeID string) {
 
 // rescueView is the live rescue status surfaced on a NodeView.
 type rescueView struct {
-	Live         bool   `json:"live"`
-	Version      string `json:"version"`
-	Status       string `json:"status"`
-	Detail       string `json:"detail"`
-	Restarts     int    `json:"restarts"`
-	LastExit     int    `json:"lastExit"`
-	LastUptimeMs int64  `json:"lastUptimeMs"`
-	SinceSec     int64  `json:"sinceSec"` // seconds the rescue has been continuously reporting
-	AgeSec       int64  `json:"ageSec"`   // seconds since the last report
+	Live         bool            `json:"live"`
+	Version      string          `json:"version"`
+	Status       string          `json:"status"`
+	Detail       string          `json:"detail"`
+	Restarts     int             `json:"restarts"`
+	LastExit     int             `json:"lastExit"`
+	LastUptimeMs int64           `json:"lastUptimeMs"`
+	SinceSec     int64           `json:"sinceSec"`           // seconds the rescue has been continuously reporting
+	AgeSec       int64           `json:"ageSec"`             // seconds since the last report
+	Commands     []rescueCommand `json:"commands,omitempty"` // recent operator commands + their status
 }
 
 // rescueStatus returns the live rescue status for a node (Live=false when no
@@ -441,6 +442,7 @@ func rescueStatus(nodeID string) rescueView {
 		LastUptimeMs: info.lastUptimeMs,
 		SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
 		AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
+		Commands:     rescueCommandHistory(nodeID),
 	}
 }
 
@@ -469,6 +471,7 @@ func liveRescueNodes() map[string]rescueView {
 			LastUptimeMs: info.lastUptimeMs,
 			SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
 			AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
+			Commands:     rescueCommandHistory(id),
 		}
 	}
 	return out
@@ -492,6 +495,11 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 		Restarts     int    `json:"restarts"`
 		LastExit     int    `json:"lastExit"`
 		LastUptimeMs int64  `json:"lastUptimeMs"`
+		Results      []struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"results"`
 	}
 	if c.BindJSON(&body) != nil {
 		return
@@ -537,10 +545,14 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 		lastSeen:     now,
 	}
 	rescueMu.Unlock()
+	// Record any command results the rescue is reporting back, then hand it the
+	// commands still pending so it can execute them (HTTPS long-poll style).
+	applyRescueResults(nodeID, body.Results)
+	pending := pendingRescueCommands(nodeID)
 	// nudge consoles so the rescue badge/detail updates without a poll
 	h.reg.broadcast("node", "event.node", gin.H{
 		"event": "rescue", "id": nodeID,
 		"rescueVersion": body.Version, "status": body.Status, "detail": body.Detail,
 	})
-	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID, "commands": pending})
 }

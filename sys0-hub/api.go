@@ -54,9 +54,9 @@ func (h *Hub) Router() http.Handler {
 	v1.GET("/methods", h.apiMethods)
 	v1.GET("/setup/status", h.apiSetupStatus)
 	v1.POST("/setup", h.apiSetup)
-	v1.GET("/releases", h.apiReleases) // public: agent download list (/dl page)
-	v1.GET("/agent", h.apiAgentRedirect)  // public: 302 to latest matching agent binary
-	v1.GET("/rescue", h.apiRescueRedirect) // public: 302 to latest matching rescue binary
+	v1.GET("/releases", h.apiReleases)           // public: agent download list (/dl page)
+	v1.GET("/agent", h.apiAgentRedirect)         // public: 302 to latest matching agent binary
+	v1.GET("/rescue", h.apiRescueRedirect)       // public: 302 to latest matching rescue binary
 	v1.POST("/rescue/report", h.apiRescueReport) // public: rescue liveness report (pre-shared key)
 
 	auth := v1.Group("", h.authMW())
@@ -67,6 +67,7 @@ func (h *Hub) Router() http.Handler {
 	auth.POST("/nodes/:id/label", h.apiNodeLabel)
 	auth.POST("/nodes/:id/detach", h.apiNodeDetach)
 	auth.POST("/nodes/:id/dismiss-rescue", h.apiNodeDismissRescue)
+	auth.POST("/nodes/:id/rescue-command", h.apiNodeRescueCommand)
 	auth.DELETE("/nodes/:id", h.apiNodeDelete)
 	auth.POST("/dispatch", h.apiDispatch)
 	auth.GET("/metrics", h.apiMetrics)
@@ -258,6 +259,36 @@ func (h *Hub) apiNodeDismissRescue(c *gin.Context) {
 	}
 	dismissRescue(id)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// apiNodeRescueCommand queues a control command for the node's supervising
+// rescue (e.g. update-agent). The rescue talks HTTPS only, so the command is
+// buffered and delivered on the rescue's next /rescue/report poll; the result
+// comes back on a later report and surfaces in the node's rescueInfo.commands.
+func (h *Hub) apiNodeRescueCommand(c *gin.Context) {
+	id := c.Param("id")
+	if !actorOf(c).nodeAllowed(id) {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
+		return
+	}
+	var body struct {
+		Kind string `json:"kind"`
+	}
+	if c.BindJSON(&body) != nil {
+		return
+	}
+	kind := rescueCmdKind(body.Kind)
+	if !validRescueCmd(kind) {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "unknown command"})
+		return
+	}
+	// Only meaningful if a rescue is actually reporting for this node.
+	if !rescueStatus(id).Live {
+		c.JSON(http.StatusConflict, gin.H{"ok": false, "error": "no live rescue for this node"})
+		return
+	}
+	cmd := enqueueRescueCommand(id, kind)
+	c.JSON(http.StatusOK, gin.H{"ok": true, "command": cmd})
 }
 
 func (h *Hub) apiDispatch(c *gin.Context) {

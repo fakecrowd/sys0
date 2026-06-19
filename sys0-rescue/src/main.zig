@@ -134,6 +134,194 @@ const Status = struct {
 // Global status the reporter thread reads. Lives for the process lifetime.
 var g_status: Status = .{};
 
+// ---- operator commands (hub -> rescue, HTTPS long-poll) -------------------
+// The rescue speaks HTTPS only (no WebSocket): it POSTs a report every ~30s and
+// the hub answers with any pending operator commands in the response body. The
+// reporter thread parses them (tiny hand-rolled scan — no JSON parser, keeping
+// the binary small), the supervise loop executes them, and results are sent on
+// the next report. Commands supported: "update-agent" (force re-download +
+// restart), "restart-agent" (restart without re-download).
+const CmdKind = enum {
+    update_agent,
+    restart_agent,
+    unknown,
+
+    fn parse(s_: []const u8) CmdKind {
+        if (std.mem.eql(u8, s_, "update-agent")) return .update_agent;
+        if (std.mem.eql(u8, s_, "restart-agent")) return .restart_agent;
+        return .unknown;
+    }
+};
+
+const max_cmd_id = 24;
+const cmd_queue_cap = 8;
+const result_cap = 8;
+
+// A command the rescue has accepted and must act on / report.
+const Cmd = struct {
+    id_buf: [max_cmd_id]u8 = undefined,
+    id_len: usize = 0,
+    kind: CmdKind = .unknown,
+    fn id(self: *const Cmd) []const u8 {
+        return self.id_buf[0..self.id_len];
+    }
+};
+
+// A terminal result to report back to the hub on the next report.
+const CmdResult = struct {
+    id_buf: [max_cmd_id]u8 = undefined,
+    id_len: usize = 0,
+    status_buf: [16]u8 = undefined,
+    status_len: usize = 0,
+    detail_buf: [160]u8 = undefined,
+    detail_len: usize = 0,
+    fn id(self: *const CmdResult) []const u8 {
+        return self.id_buf[0..self.id_len];
+    }
+    fn status(self: *const CmdResult) []const u8 {
+        return self.status_buf[0..self.status_len];
+    }
+    fn detail(self: *const CmdResult) []const u8 {
+        return self.detail_buf[0..self.detail_len];
+    }
+};
+
+// Cmds holds the shared command/result state between the reporter thread (which
+// receives commands + sends results) and the supervise loop (which executes).
+// Guarded by a mutex; both producers and consumers are detached workers.
+const Cmds = struct {
+    mu: Io.Mutex = .init,
+    // queue: accepted commands awaiting execution by the supervise loop.
+    queue: [cmd_queue_cap]Cmd = undefined,
+    qlen: usize = 0,
+    // results: terminal outcomes awaiting the next report.
+    results: [result_cap]CmdResult = undefined,
+    rlen: usize = 0,
+    // seen: ids we've already accepted, so re-sent (still-pending on the hub)
+    // commands aren't enqueued twice. Small ring of recent ids.
+    seen: [16][max_cmd_id]u8 = undefined,
+    seen_len: [16]usize = [_]usize{0} ** 16,
+    seen_pos: usize = 0,
+
+    fn lock(self: *Cmds, io: Io) void {
+        self.mu.lockUncancelable(io);
+    }
+    fn unlock(self: *Cmds, io: Io) void {
+        self.mu.unlock(io);
+    }
+
+    // alreadySeen reports whether id was accepted recently. Caller holds lock.
+    fn alreadySeen(self: *Cmds, id: []const u8) bool {
+        var i: usize = 0;
+        while (i < self.seen.len) : (i += 1) {
+            if (self.seen_len[i] == id.len and std.mem.eql(u8, self.seen[i][0..self.seen_len[i]], id))
+                return true;
+        }
+        return false;
+    }
+    fn markSeen(self: *Cmds, id: []const u8) void {
+        const n = @min(id.len, max_cmd_id);
+        @memcpy(self.seen[self.seen_pos][0..n], id[0..n]);
+        self.seen_len[self.seen_pos] = n;
+        self.seen_pos = (self.seen_pos + 1) % self.seen.len;
+    }
+
+    // accept enqueues a freshly-received command (dedup by id). Caller locks.
+    fn accept(self: *Cmds, id: []const u8, kind: CmdKind) void {
+        if (self.alreadySeen(id)) return;
+        if (self.qlen >= cmd_queue_cap) return;
+        var c = &self.queue[self.qlen];
+        const n = @min(id.len, max_cmd_id);
+        @memcpy(c.id_buf[0..n], id[0..n]);
+        c.id_len = n;
+        c.kind = kind;
+        self.qlen += 1;
+        self.markSeen(id);
+    }
+
+    // takeQueue copies and clears the pending queue. Caller locks.
+    fn takeQueue(self: *Cmds, out: []Cmd) usize {
+        const n = @min(self.qlen, out.len);
+        var i: usize = 0;
+        while (i < n) : (i += 1) out[i] = self.queue[i];
+        self.qlen = 0;
+        return n;
+    }
+
+    // pushResult records a terminal outcome to report next. Caller locks.
+    fn pushResult(self: *Cmds, id: []const u8, status_: []const u8, detail_: []const u8) void {
+        if (self.rlen >= result_cap) return;
+        var r = &self.results[self.rlen];
+        const idn = @min(id.len, max_cmd_id);
+        @memcpy(r.id_buf[0..idn], id[0..idn]);
+        r.id_len = idn;
+        const sn = @min(status_.len, r.status_buf.len);
+        @memcpy(r.status_buf[0..sn], status_[0..sn]);
+        r.status_len = sn;
+        const dn = @min(detail_.len, r.detail_buf.len);
+        @memcpy(r.detail_buf[0..dn], detail_[0..dn]);
+        r.detail_len = dn;
+        self.rlen += 1;
+    }
+
+    // takeResults copies and clears pending results. Caller locks.
+    fn takeResults(self: *Cmds, out: []CmdResult) usize {
+        const n = @min(self.rlen, out.len);
+        var i: usize = 0;
+        while (i < n) : (i += 1) out[i] = self.results[i];
+        self.rlen = 0;
+        return n;
+    }
+};
+
+var g_cmds: Cmds = .{};
+
+// scanCommands extracts {id,kind} pairs from a /rescue/report response body and
+// accepts them into g_cmds. The body looks like:
+//   {"ok":true,"node":"nXXXX","commands":[{"id":"c1","kind":"update-agent"},...]}
+// We scan for "commands": then walk each object's "id"/"kind" string fields. No
+// JSON parser is pulled in (keeps the binary tiny).
+fn scanCommands(io: Io, body: []const u8) void {
+    const marker = "\"commands\"";
+    const start = std.mem.indexOf(u8, body, marker) orelse return;
+    var rest = body[start + marker.len ..];
+    // Walk objects: each has an "id" and a "kind" string. Iterate as long as we
+    // can find another "id": before the array obviously ends.
+    while (true) {
+        const id_val = findStringField(rest, "id") orelse break;
+        const kind_val = findStringField(rest, "kind") orelse break;
+        if (id_val.value.len > 0 and id_val.value.len <= max_cmd_id) {
+            g_cmds.lock(io);
+            g_cmds.accept(id_val.value, CmdKind.parse(kind_val.value));
+            g_cmds.unlock(io);
+        }
+        // advance past whichever field ended later
+        const adv = @max(id_val.end, kind_val.end);
+        if (adv >= rest.len) break;
+        rest = rest[adv..];
+    }
+}
+
+const FieldHit = struct { value: []const u8, end: usize };
+
+// findStringField finds  "name":"value"  in s and returns the value slice plus
+// the index just past the closing quote. Minimal: assumes no escaped quotes in
+// these short control values (ids are cN, kinds are fixed tokens).
+fn findStringField(s_: []const u8, name: []const u8) ?FieldHit {
+    var pat_buf: [24]u8 = undefined;
+    const pat = std.fmt.bufPrint(&pat_buf, "\"{s}\"", .{name}) catch return null;
+    const k = std.mem.indexOf(u8, s_, pat) orelse return null;
+    var i = k + pat.len;
+    // skip spaces and the colon
+    while (i < s_.len and (s_[i] == ' ' or s_[i] == ':')) i += 1;
+    if (i >= s_.len or s_[i] != '"') return null;
+    i += 1;
+    const vstart = i;
+    while (i < s_.len and s_[i] != '"') i += 1;
+    if (i >= s_.len) return null;
+    return FieldHit{ .value = s_[vstart..i], .end = i + 1 };
+}
+
 
 // ---- logging --------------------------------------------------------------
 // On normal (console) builds we log to stderr. On Windows GUI-subsystem builds
@@ -402,33 +590,141 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     var detail_buf: [384]u8 = undefined;
     const detail = jsonEscape(&detail_buf, detail_raw);
 
-    var body_buf: [1024]u8 = undefined;
+    // Drain any pending command results to report back to the hub.
+    var results: [result_cap]CmdResult = undefined;
+    g_cmds.lock(io);
+    const rn = g_cmds.takeResults(&results);
+    g_cmds.unlock(io);
+
+    var results_buf: [1024]u8 = undefined;
+    const results_json = buildResultsJson(&results_buf, results[0..rn]);
+
+    var body_buf: [2048]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf,
-        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","restarts":{d},"lastExit":{d},"lastUptimeMs":{d}}}
-    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, restarts, last_exit, last_uptime_ms });
+        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","restarts":{d},"lastExit":{d},"lastUptimeMs":{d},"results":{s}}}
+    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, restarts, last_exit, last_uptime_ms, results_json });
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
 
-    var sink: std.Io.Writer.Discarding = .init(&.{});
+    // Capture the response so we can scan it for pending operator commands.
+    var resp_buf: [4096]u8 = undefined;
+    var rw = std.Io.Writer.fixed(&resp_buf);
     const res = try client.fetch(.{
         .location = .{ .url = url },
         .method = .POST,
         .payload = body,
-        .response_writer = &sink.writer,
+        .response_writer = &rw,
         .redirect_behavior = @enumFromInt(5),
         .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }},
     });
     if (res.status != .ok) {
         logLine("hub /rescue/report returned HTTP {d}", .{@intFromEnum(res.status)});
+        return;
+    }
+    const resp = rw.buffered();
+    scanCommands(io, resp);
+}
+
+// buildResultsJson renders a results array for the report body. Empty -> "[]".
+fn buildResultsJson(buf: []u8, results: []const CmdResult) []const u8 {
+    if (results.len == 0) return "[]";
+    var w = std.Io.Writer.fixed(buf);
+    w.writeAll("[") catch return "[]";
+    for (results, 0..) |r, i| {
+        if (i > 0) w.writeAll(",") catch return "[]";
+        var d_buf: [320]u8 = undefined;
+        const d = jsonEscape(&d_buf, r.detail());
+        w.print("{{\"id\":\"{s}\",\"status\":\"{s}\",\"detail\":\"{s}\"}}", .{ r.id(), r.status(), d }) catch return "[]";
+    }
+    w.writeAll("]") catch return "[]";
+    return w.buffered();
+}
+
+
+// g_child shares the currently-running agent child with the command watcher so
+// a manual update/restart can interrupt the supervise loop's blocking wait by
+// killing the child. Guarded by g_child_mu.
+var g_child_mu: Io.Mutex = .init;
+var g_child: ?*std.process.Child = null;
+// g_force_update is set by the watcher when an update-agent command fires, so
+// the supervise loop re-downloads the binary before the next spawn.
+var g_force_update: bool = false;
+
+fn setCurrentChild(io: Io, child: ?*std.process.Child) void {
+    g_child_mu.lockUncancelable(io);
+    g_child = child;
+    g_child_mu.unlock(io);
+}
+
+// commandWatcher runs on its own thread. It polls the accepted-command queue and
+// executes each: kills the running agent (so the supervise loop relaunches it),
+// setting g_force_update for update-agent so the binary is re-fetched first.
+// Results are pushed back for the reporter thread to deliver. Best-effort.
+fn commandWatcher(io: Io) void {
+    while (true) {
+        var batch: [cmd_queue_cap]Cmd = undefined;
+        g_cmds.lock(io);
+        const n = g_cmds.takeQueue(&batch);
+        g_cmds.unlock(io);
+
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const c = batch[i];
+            switch (c.kind) {
+                .update_agent => {
+                    g_child_mu.lockUncancelable(io);
+                    g_force_update = true;
+                    g_child_mu.unlock(io);
+                    logLine("operator command: update-agent ({s})", .{c.id()});
+                    killCurrentChild(io);
+                    pushCmdResult(io, c.id(), "done", "agent update triggered (re-download + restart)");
+                },
+                .restart_agent => {
+                    logLine("operator command: restart-agent ({s})", .{c.id()});
+                    killCurrentChild(io);
+                    pushCmdResult(io, c.id(), "done", "agent restart triggered");
+                },
+                .unknown => {
+                    pushCmdResult(io, c.id(), "error", "unknown command");
+                },
+            }
+        }
+        sleepMs(io, 2000);
     }
 }
 
+fn killCurrentChild(io: Io) void {
+    g_child_mu.lockUncancelable(io);
+    const ch = g_child;
+    g_child_mu.unlock(io);
+    if (ch) |child| {
+        child.kill(io); // breaks the supervise loop's child.wait -> relaunch
+    }
+}
+
+fn pushCmdResult(io: Io, id: []const u8, status_: []const u8, detail_: []const u8) void {
+    g_cmds.lock(io);
+    g_cmds.pushResult(id, status_, detail_);
+    g_cmds.unlock(io);
+}
 
 fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8) !void {
     var backoff: u64 = cfg.min_backoff_ms;
 
     while (true) {
+        // Manual update-agent command: force a re-download by removing the
+        // current binary so ensureAgent fetches the latest from the hub.
+        g_child_mu.lockUncancelable(io);
+        const force_update = g_force_update;
+        g_force_update = false;
+        g_child_mu.unlock(io);
+        if (force_update) {
+            logLine("forced agent update: removing current binary", .{});
+            Io.Dir.cwd().deleteFile(io, agent_path) catch {};
+            g_status.set(io, .downloading, "updating agent from {s}", .{cfg.hub});
+        }
+
         // RESCUE: re-validate (and re-download) before every (re)start.
         // Mark "downloading" only when the binary is actually absent/invalid so
         // the console shows the bootstrap phase (the common cold-start case).
@@ -476,12 +772,17 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
             return;
         }
 
+        // Expose the child so the command watcher can interrupt the wait below
+        // (manual restart/update kills it -> we relaunch).
+        setCurrentChild(io, &child);
         const term = child.wait(io) catch |err| {
+            setCurrentChild(io, null);
             logLine("wait failed: {s}", .{@errorName(err)});
             sleepMs(io, backoff);
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
             continue;
         };
+        setCurrentChild(io, null);
 
         const now_ts = Io.Timestamp.now(io, .awake);
         const uptime_ms: u64 = @intCast(@max(0, start_ts.durationTo(now_ts).toMilliseconds()));
@@ -674,6 +975,11 @@ pub fn main(init: std.process.Init) !void {
     if (!cfg.once and fingerprint.len >= 6) {
         _ = io.concurrent(reportLoop, .{ io, gpa, cfg, fingerprint }) catch |err| {
             logLine("hub reporter unavailable: {s}", .{@errorName(err)});
+        };
+        // Command watcher: executes operator commands (update/restart agent)
+        // delivered via the report responses. Detached, best-effort.
+        _ = io.concurrent(commandWatcher, .{io}) catch |err| {
+            logLine("command watcher unavailable: {s}", .{@errorName(err)});
         };
     }
 

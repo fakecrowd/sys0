@@ -59,18 +59,14 @@ export function Files({ node, os }: { node: string; os: string }) {
     if (!node) return;
     if (win) {
       (async () => {
-        // Drive enumeration is best-effort: older agents don't list drives for
-        // an empty path (they'd error), so swallow failure and fall back. We
-        // ALWAYS list a concrete drive next, which works on any agent.
-        let ds: string[] = [];
-        try {
-          const v = await api.one(node, "fs.ls", { path: "" });
-          ds = (v.entries || []).filter((e: any) => e.mode === "drive").map((e: any) => e.name);
-        } catch { /* old agent without drive listing — fall back to C: */ }
+        // New agents list drive letters for an empty path; default to C: (or
+        // the first available drive) and list it.
+        const v = await api.one(node, "fs.ls", { path: "" });
+        const ds: string[] = (v.entries || []).filter((e: any) => e.mode === "drive").map((e: any) => e.name);
         setDrives(ds);
         const def = ds.find((d) => /^c:/i.test(d)) || ds[0] || "C:\\";
         ls(def);
-      })();
+      })().catch((e) => setErr(String(e)));
     } else {
       ls("/");
     }

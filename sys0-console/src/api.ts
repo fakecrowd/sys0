@@ -1,5 +1,14 @@
 // REST client for the sys0-hub API.
 
+export type RescueCommand = {
+  id: string;
+  kind: string; // update-agent | restart-agent
+  status: string; // pending | acked | running | done | error
+  detail: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type RescueInfo = {
   live: boolean;
   version: string;
@@ -10,6 +19,7 @@ export type RescueInfo = {
   lastUptimeMs: number;
   sinceSec: number; // continuous-reporting uptime
   ageSec: number; // seconds since last report
+  commands?: RescueCommand[]; // recent operator commands + their status
 };
 
 export type Node = {
@@ -162,6 +172,8 @@ export const api = {
   detach: (id: string) => req<{ ok: boolean }>("POST", `/api/v1/nodes/${id}/detach`, {}),
   deleteNode: (id: string) => req<{ ok: boolean; error?: string }>("DELETE", `/api/v1/nodes/${id}`),
   dismissRescue: (id: string) => req<{ ok: boolean; error?: string }>("POST", `/api/v1/nodes/${id}/dismiss-rescue`, {}),
+  rescueCommand: (id: string, kind: string) =>
+    req<{ ok: boolean; error?: string; command?: any }>("POST", `/api/v1/nodes/${id}/rescue-command`, { kind }),
   keysList: () => req<{ ok: boolean; keys: any[] }>("GET", "/api/v1/keys"),
   keyCreate: (body: any) =>
     req<{ ok: boolean; key?: string; id?: string; error?: string }>("POST", "/api/v1/keys", body),
