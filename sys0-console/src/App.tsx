@@ -294,9 +294,10 @@ function NodeCard({
   const selectable = !offline && !bootstrapping;
 
   return (
-    <div className="panel p-2.5" style={{ ...(on ? { borderColor: "var(--accent)" } : {}), ...(offline ? { opacity: 0.55 } : {}) }}>
-      <div className={selectable ? "flex items-center gap-2 cursor-pointer" : "flex items-center gap-2"}
-        onClick={() => selectable && onSelect(n.id)}>
+    <div className={selectable ? "panel p-2.5 cursor-pointer" : "panel p-2.5"}
+      onClick={() => selectable && onSelect(n.id)}
+      style={{ ...(on ? { borderColor: "var(--accent)" } : {}), ...(offline ? { opacity: 0.55 } : {}) }}>
+      <div className="flex items-center gap-2">
         <span className="dot" style={{ background: offline ? "var(--muted)" : bootstrapping ? "var(--warn)" : "var(--accent)" }} />
         <span style={{ color: on ? "var(--accent)" : "var(--fg)" }}>{n.label}</span>
         {on && <span className="tag" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>聚焦</span>}
@@ -325,7 +326,7 @@ function NodeCard({
       {offline && n.lastSeen > 0 && (
         <div className="mono-sm mt-1">上次在线 {new Date(n.lastSeen * 1000).toLocaleString()}</div>
       )}
-      <div className="flex flex-wrap gap-1 mt-2">
+      <div className="flex flex-wrap gap-1 mt-2" onClick={(e) => e.stopPropagation()}>
         {bootstrapping ? (
           <button className="btn" style={{ padding: "2px 7px", color: "var(--danger)" }} onClick={dismiss}>清除</button>
         ) : !offline ? (
