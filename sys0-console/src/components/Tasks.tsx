@@ -9,7 +9,8 @@ import { confirmDialog } from "./dialogs";
 // Managed processes: launch & supervise long-running child processes on the
 // FOCUSED node. Output is a real PTY rendered with xterm (ANSI colors), fully
 // interactive, with history for both running and past (exited) processes.
-// The node is fixed by the workspace — no in-window node picker.
+// The node is fixed by the workspace — no in-window node picker. A
+// ResizeObserver refits the terminal whenever the window frame changes size.
 export function Tasks({ node }: { node: string }) {
   const [tasks, setTasks] = useState<any[]>([]);
   const [sel, setSel] = useState<string>("");
@@ -22,6 +23,16 @@ export function Tasks({ node }: { node: string }) {
   const ws = useRef<WSClient>();
   const selRef = useRef(sel);
   useEffect(() => { selRef.current = sel; }, [sel]);
+
+  const fitTerm = useCallback(() => {
+    const f = fit.current, t = term.current;
+    if (!f || !t) return;
+    try {
+      f.fit();
+      if (selRef.current && ws.current && t.cols > 0 && t.rows > 0)
+        ws.current.call("dispatch", { select: { nodes: [node] }, call: { method: "task.resize", params: { task: selRef.current, cols: t.cols, rows: t.rows } } });
+    } catch { /* not measurable yet */ }
+  }, [node]);
 
   // one xterm + one WS for the whole window
   useEffect(() => {
@@ -44,13 +55,10 @@ export function Tasks({ node }: { node: string }) {
     });
     term.current = t;
     fit.current = f;
-    const onResize = () => {
-      f.fit();
-      if (selRef.current && ws.current)
-        ws.current.call("dispatch", { select: { nodes: [node] }, call: { method: "task.resize", params: { task: selRef.current, cols: t.cols, rows: t.rows } } });
-    };
-    window.addEventListener("resize", onResize);
-    return () => { window.removeEventListener("resize", onResize); t.dispose(); };
+    const ro = new ResizeObserver(() => fitTerm());
+    if (termHost.current) ro.observe(termHost.current);
+    window.addEventListener("resize", fitTerm);
+    return () => { ro.disconnect(); window.removeEventListener("resize", fitTerm); t.dispose(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -81,6 +89,7 @@ export function Tasks({ node }: { node: string }) {
     selRef.current = id;
     term.current?.clear();
     term.current?.reset();
+    fitTerm();
     try {
       const v = await api.one(node, "task.output", { task: id });
       if (v.data) term.current?.write(b64decode(v.data));

@@ -136,7 +136,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
     { key: "shell", title: "Shell", render: () => <Shell node={focused} /> },
     { key: "tasks", title: "任务", render: () => <Tasks node={focused} /> },
     { key: "proc", title: "进程", render: () => <Processes node={focused} /> },
-    { key: "files", title: "文件", render: () => <Files node={focused} /> },
+    { key: "files", title: "文件", render: () => <Files node={focused} os={focusedNode?.host.os || ""} /> },
     { key: "monitor", title: "监控", render: () => <Monitor node={focused} live={live} /> },
     { key: "actions", title: "动作", render: () => <Actions node={focused} /> },
     { key: "audit", title: "审计", render: () => <Audit /> },

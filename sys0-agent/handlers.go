@@ -97,6 +97,21 @@ func (a *Agent) doFsLs(params json.RawMessage) (any, *rpc.Error) {
 	if e := decode(params, &p); e != nil {
 		return nil, e
 	}
+	// Windows has no single filesystem root: at the "drive list" level (empty
+	// path, or "/" / "\\") enumerate the available drive letters as dirs so the
+	// console file browser can offer C:\ D:\ etc.
+	if runtime.GOOS == "windows" && (p.Path == "" || p.Path == "/" || p.Path == "\\") {
+		res := wire.FsLsResult{Path: "", Entries: []wire.FsEntry{}}
+		for c := 'A'; c <= 'Z'; c++ {
+			root := string(c) + ":\\"
+			if _, err := os.Stat(root); err == nil {
+				res.Entries = append(res.Entries, wire.FsEntry{
+					Name: root, Mode: "drive", IsDir: true,
+				})
+			}
+		}
+		return res, nil
+	}
 	entries, err := os.ReadDir(p.Path)
 	if err != nil {
 		return nil, rpc.Errorf(rpc.CodeInternal, "%v", err)

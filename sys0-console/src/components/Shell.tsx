@@ -15,18 +15,24 @@ type ShellInfo = {
 // existing sessions (with scrollback replay) instead of forcing a new one.
 // Multiple shells per node are supported via the tab bar. The node is fixed by
 // the workspace — there is no in-window node picker.
+//
+// Each session owns its OWN persistent container div (created once, term.open
+// called once). Switching just toggles which container is visible — we never
+// wipe the host or re-open a terminal (re-opening detaches xterm's renderer and
+// renders blank). A ResizeObserver refits the active terminal whenever the
+// window frame changes size.
 export function Shell({ node }: { node: string }) {
   const [connected, setConnected] = useState(false);
   const [shells, setShells] = useState<ShellInfo[]>([]);
   const [active, setActive] = useState<string>("");
-  const termRef = useRef<HTMLDivElement>(null);
+  const areaRef = useRef<HTMLDivElement>(null); // holds all per-session containers
 
-  // ws + per-session terminals persist across renders.
   const st = useRef<{
     ws?: WSClient;
-    terms: Map<string, { term: XTerm; fit: FitAddon; loaded: boolean }>;
+    terms: Map<string, { term: XTerm; fit: FitAddon; el: HTMLDivElement; loaded: boolean }>;
     node: string;
-  }>({ terms: new Map(), node: "" });
+    active: string;
+  }>({ terms: new Map(), node: "", active: "" });
 
   const dispatch = useCallback((method: string, params: any) => {
     const s = st.current;
@@ -34,16 +40,25 @@ export function Shell({ node }: { node: string }) {
     return s.ws.call("dispatch", { select: { nodes: [s.node] }, call: { method, params } });
   }, []);
 
-  // Connect: open ws, subscribe, list existing shells, attach to the first
-  // (or spawn one if the node has none).
+  // Fit the active terminal to its container and tell the agent the new size.
+  const fitActive = useCallback(() => {
+    const s = st.current;
+    const e = s.terms.get(s.active);
+    if (!e || e.el.style.display === "none") return;
+    try {
+      e.fit.fit();
+      if (e.term.cols > 0 && e.term.rows > 0)
+        dispatch("shell.resize", { session: s.active, cols: e.term.cols, rows: e.term.rows });
+    } catch { /* container not measurable yet */ }
+  }, [dispatch]);
+
   const connect = async () => {
     if (!node) return;
     const ws = new WSClient();
     ws.connect();
     await ws.call("hub.subscribe", { topics: ["shell"] });
-    st.current = { ws, terms: new Map(), node };
+    st.current = { ws, terms: new Map(), node, active: "" };
 
-    // Route all live shell output to the matching terminal.
     ws.on("event.shell", (p: any) => {
       if (p.node !== st.current.node) return;
       const entry = st.current.terms.get(p.session);
@@ -72,15 +87,21 @@ export function Shell({ node }: { node: string }) {
     } catch { return []; }
   };
 
-  // Attach a terminal to an existing session: create the xterm lazily, replay
-  // the buffered scrollback once, then live chunks flow via the emit handler.
-  const attach = async (session: string) => {
+  // Attach/switch to a session: ensure its container exists (created once),
+  // hide every other container, show this one, replay scrollback on first open.
+  const attach = (session: string) => {
     setActive(session);
-    // Defer to let the container mount, then bind/replay.
+    st.current.active = session;
     setTimeout(async () => {
       const s = st.current;
+      const host = areaRef.current;
+      if (!host) return;
       let entry = s.terms.get(session);
       if (!entry) {
+        const el = document.createElement("div");
+        el.style.height = "100%";
+        el.style.width = "100%";
+        host.appendChild(el);
         const term = new XTerm({
           fontFamily: '"JetBrains Mono", monospace', fontSize: 13,
           theme: { background: "#0a0e0f", foreground: "#c8d3d6", cursor: "#38e07b" },
@@ -88,18 +109,16 @@ export function Shell({ node }: { node: string }) {
         });
         const fit = new FitAddon();
         term.loadAddon(fit);
-        entry = { term, fit, loaded: false };
+        term.open(el); // open ONCE on this dedicated container
+        entry = { term, fit, el, loaded: false };
         s.terms.set(session, entry);
         term.onData((d) => {
           dispatch("shell.input", { session, data: b64encode(new TextEncoder().encode(d)) });
         });
       }
-      const host = termRef.current;
-      if (host) {
-        host.innerHTML = "";
-        entry.term.open(host);
-        entry.fit.fit();
-      }
+      // Show only this session's container.
+      s.terms.forEach((e, sid) => { e.el.style.display = sid === session ? "block" : "none"; });
+      try { entry.fit.fit(); } catch { /* not measurable yet */ }
       // Replay scrollback once.
       if (!entry.loaded) {
         try {
@@ -109,8 +128,8 @@ export function Shell({ node }: { node: string }) {
           entry.loaded = true;
         } catch { /* ignore */ }
       }
-      // Sync size to the agent.
-      dispatch("shell.resize", { session, cols: entry.term.cols, rows: entry.term.rows });
+      if (entry.term.cols > 0)
+        dispatch("shell.resize", { session, cols: entry.term.cols, rows: entry.term.rows });
       entry.term.focus();
     }, 0);
   };
@@ -124,36 +143,34 @@ export function Shell({ node }: { node: string }) {
     attach(item.value.session);
   };
 
-  // Close (kill) a shell on the agent.
   const closeShell = async (session: string) => {
     await dispatch("shell.close", { session }).catch(() => {});
     const entry = st.current.terms.get(session);
-    entry?.term.dispose();
+    if (entry) { entry.term.dispose(); entry.el.remove(); }
     st.current.terms.delete(session);
     const list = await refreshList();
-    if (active === session) {
+    if (st.current.active === session) {
       if (list.length > 0) attach(list[list.length - 1].session);
-      else { setActive(""); if (termRef.current) termRef.current.innerHTML = ""; }
+      else { setActive(""); st.current.active = ""; }
     }
   };
 
-  // Disconnect the console only — shells keep running on the agent.
   const disconnect = () => {
-    st.current.terms.forEach((e) => e.term.dispose());
+    st.current.terms.forEach((e) => { e.term.dispose(); e.el.remove(); });
     st.current.ws?.close();
-    st.current = { terms: new Map(), node: "" };
+    st.current = { terms: new Map(), node: "", active: "" };
     setShells([]); setActive(""); setConnected(false);
-    if (termRef.current) termRef.current.innerHTML = "";
   };
 
+  // Refit the active terminal whenever the window frame (host) resizes.
   useEffect(() => {
-    const onResize = () => {
-      const e = st.current.terms.get(active);
-      if (e) { e.fit.fit(); dispatch("shell.resize", { session: active, cols: e.term.cols, rows: e.term.rows }); }
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, [active, dispatch]);
+    const host = areaRef.current;
+    if (!host) return;
+    const ro = new ResizeObserver(() => fitActive());
+    ro.observe(host);
+    window.addEventListener("resize", fitActive);
+    return () => { ro.disconnect(); window.removeEventListener("resize", fitActive); };
+  }, [fitActive]);
 
   useEffect(() => () => disconnect(), []); // cleanup on unmount
 
@@ -191,7 +208,7 @@ export function Shell({ node }: { node: string }) {
       )}
 
       <div className="panel" style={{ flex: 1, padding: 8, minHeight: 0 }}>
-        <div ref={termRef} style={{ height: "100%", width: "100%" }} />
+        <div ref={areaRef} style={{ height: "100%", width: "100%", position: "relative" }} />
       </div>
     </div>
   );

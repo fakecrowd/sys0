@@ -52,7 +52,7 @@ export function Dialogs() {
   return (
     <div
       className="fixed inset-0 flex items-center justify-center"
-      style={{ background: "rgba(0,0,0,.6)", backdropFilter: "blur(2px)", zIndex: 50 }}
+      style={{ background: "rgba(0,0,0,.6)", backdropFilter: "blur(2px)", zIndex: 2147483600 }}
       onMouseDown={(e) => e.target === e.currentTarget && cancel()}
     >
       <div
