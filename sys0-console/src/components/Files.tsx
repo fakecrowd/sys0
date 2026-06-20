@@ -21,6 +21,7 @@ export function Files({ node, os }: { node: string; os: string }) {
   // upload progress: null = idle; otherwise live transfer state + a small log.
   const [up, setUp] = useState<null | {
     name: string; sent: number; total: number; done: boolean; failed: boolean;
+    bps: number; // bytes/sec, live
   }>(null);
   const [uplog, setUplog] = useState<string[]>([]);
 
@@ -112,13 +113,13 @@ export function Files({ node, os }: { node: string; os: string }) {
   const upload = async (file: File) => {
     const dest = join(path, file.name);
     const total = file.size;
-    const log = (m: string) => setUplog((l) => [...l.slice(-40), `${new Date().toLocaleTimeString()} ${m}`]);
+    const t0 = Date.now();
+    const log = (m: string) => setUplog((l) => [...l.slice(-60), `${new Date().toLocaleTimeString()} ${m}`]);
     setUplog([]);
-    setUp({ name: file.name, sent: 0, total, done: false, failed: false });
+    setUp({ name: file.name, sent: 0, total, done: false, failed: false, bps: 0 });
     log(`开始上传 ${file.name}（${fmtSize(total)}）→ ${dest}`);
     try {
       const buf = new Uint8Array(await file.arrayBuffer());
-      // empty file: single zero-length write so the file is still created.
       if (total === 0) {
         await api.one(node, "fs.put", { path: dest, data: "", offset: 0 });
       }
@@ -126,19 +127,23 @@ export function Files({ node, os }: { node: string; os: string }) {
         const slice = buf.subarray(off, Math.min(off + CHUNK, total));
         const res: any = await api.one(node, "fs.put", { path: dest, data: b64encode(slice), offset: off });
         const sent = Math.min(off + slice.length, total);
-        setUp({ name: file.name, sent, total, done: false, failed: false });
+        const elapsed = Math.max(0.001, (Date.now() - t0) / 1000);
+        const bps = sent / elapsed;
+        setUp({ name: file.name, sent, total, done: false, failed: false, bps });
         const pct = total ? Math.floor((sent / total) * 100) : 100;
         log(`分片 @${fmtSize(off)} 写入 ${fmtSize(slice.length)}（${pct}%${res?.size != null ? `，节点 ${fmtSize(res.size)}` : ""}）`);
       }
-      setUp({ name: file.name, sent: total, total, done: true, failed: false });
-      log(`完成 ✓ 共 ${fmtSize(total)}`);
+      const elapsed = Math.max(0.001, (Date.now() - t0) / 1000);
+      setUp({ name: file.name, sent: total, total, done: true, failed: false, bps: total / elapsed });
+      log(`完成 ✓ 共 ${fmtSize(total)} · 用时 ${elapsed.toFixed(1)}s · 均速 ${fmtSize(total / elapsed)}/s`);
       ls(path);
-      // auto-clear the bar after a short pause so the success state is visible.
-      setTimeout(() => setUp((u) => (u && u.done ? null : u)), 4000);
+      // NOTE: do NOT auto-dismiss. Small files transfer in a blink; if the bar
+      // vanished on its own the user would never see that anything happened.
+      // The panel persists (showing the completed state + trace) until the user
+      // closes it or starts another upload.
     } catch (e) {
       setUp((u) => (u ? { ...u, failed: true } : u));
       log(`失败 ✗ ${String(e)}`);
-      alertDialog(String(e), { title: "上传失败" });
     }
   };
 
@@ -173,7 +178,7 @@ export function Files({ node, os }: { node: string; os: string }) {
               {up.failed ? "上传失败" : up.done ? "上传完成" : "上传中"} · {up.name}
             </span>
             <span style={{ color: "var(--muted)" }}>
-              {fmtSize(up.sent)} / {fmtSize(up.total)} · {up.total ? Math.floor((up.sent / up.total) * 100) : 100}%
+              {fmtSize(up.sent)} / {fmtSize(up.total)} · {up.total ? Math.floor((up.sent / up.total) * 100) : 100}%{up.bps > 0 ? ` · ${fmtSize(up.bps)}/s` : ""}
             </span>
             {(up.done || up.failed) && (
               <button className="btn" style={{ padding: "0 7px" }} onClick={() => setUp(null)}>×</button>
