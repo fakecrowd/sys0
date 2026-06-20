@@ -685,9 +685,9 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 	if len(body.Cwd) > 512 {
 		body.Cwd = body.Cwd[:512]
 	}
-	// Clamp trace to keep the in-memory map bounded (rescue caps at ~12, but be safe).
-	if len(body.Trace) > 24 {
-		body.Trace = body.Trace[len(body.Trace)-24:]
+	// Clamp trace to keep the in-memory map bounded (rescue caps at trace_cap=32).
+	if len(body.Trace) > 32 {
+		body.Trace = body.Trace[len(body.Trace)-32:]
 	}
 	for i := range body.Trace {
 		if len(body.Trace[i].M) > 160 {

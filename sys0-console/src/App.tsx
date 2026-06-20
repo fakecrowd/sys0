@@ -10,6 +10,7 @@ import { Actions } from "./components/Actions";
 import { Audit } from "./components/Audit";
 import { Keys } from "./components/Keys";
 import { AccountModal } from "./components/AccountModal";
+import { CacheModal } from "./components/CacheModal";
 import { Setup } from "./components/Setup";
 import { Download } from "./components/Download";
 import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
@@ -103,6 +104,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
   const [live, setLive] = useState<Record<string, any>>({});
   const [navOpen, setNavOpen] = useState(false); // mobile node drawer
   const [acctOpen, setAcctOpen] = useState(false); // account modal (node-independent)
+  const [cacheOpen, setCacheOpen] = useState(false); // hub release-binary cache modal
   const isAdmin = getRole() === "admin";
 
   const refresh = useCallback(async () => {
@@ -162,6 +164,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <span className="mono-sm truncate">
             {nodes.filter((n) => n.state === "online").length} online · {focusedNode ? `▸ ${focusedNode.label}` : "未聚焦"}
           </span>
+          <button className="btn" title="hub 缓存的 agent/rescue release 版本与强制更新" onClick={() => setCacheOpen(true)}>镜像</button>
           <button className="btn" title="账户" onClick={() => setAcctOpen(true)}>
             <span className="dot" style={{ background: "var(--accent)" }} /> {getUser() || getRole()}
           </button>
@@ -187,6 +190,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
         </main>
       </div>
       {acctOpen && <AccountModal nodes={nodes} onClose={() => setAcctOpen(false)} />}
+      {cacheOpen && <CacheModal onClose={() => setCacheOpen(false)} />}
     </div>
   );
 }
@@ -400,6 +404,41 @@ const CMD_STATUS: Record<string, { label: string; color: string }> = {
   error: { label: "失败", color: "var(--danger)" },
 };
 
+// TraceModal shows the rescue's full activity timeline (downloads, agent
+// start/exit, operator command receipt + execution results) in a scrollable
+// overlay. High z-index so it sits above the window manager (which uses an
+// unbounded growing z-index).
+function TraceModal({ nodeId, trace, onClose }: {
+  nodeId: string; trace: { t: number; m: string }[]; onClose: () => void;
+}) {
+  return (
+    <div onClick={onClose} style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2147483600,
+    }}>
+      <div onClick={(e) => e.stopPropagation()} className="panel" style={{
+        width: "min(680px, 92vw)", maxHeight: "82vh", display: "flex", flexDirection: "column",
+        background: "var(--panel)", padding: 0,
+      }}>
+        <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
+          <span style={{ flex: 1 }}>活动追踪 · {nodeId}</span>
+          <span className="mono-sm" style={{ color: "var(--muted)" }}>{trace.length} 条</span>
+          <button className="btn" style={{ padding: "1px 9px" }} onClick={onClose}>关闭</button>
+        </div>
+        <div className="mono-sm" style={{ overflowY: "auto", padding: "8px 12px" }}>
+          {trace.length === 0 && <div style={{ color: "var(--muted)" }}>暂无记录</div>}
+          {trace.map((ev, i) => (
+            <div key={i} className="flex gap-2" style={{ lineHeight: 1.6, padding: "1px 0" }}>
+              <span style={{ color: "var(--muted)", minWidth: 64, flexShrink: 0 }}>{fmtClock(ev.t)}</span>
+              <span style={{ wordBreak: "break-all" }}>{ev.m}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
   nodeId: string; r?: RescueInfo | null; fallbackVer?: string; onChanged: () => void;
 }) {
@@ -433,8 +472,9 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
   // Active (non-terminal) commands shown newest-first; terminal ones too but
   // de-emphasised. Only show controls when the rescue is actually live.
   const cmds: RescueCommand[] = (r?.commands || []).slice().reverse();
-  // Trace newest-last (chronological), capped to the most recent entries.
-  const trace = (r?.trace || []).slice(-12);
+  // Full trace, chronological (oldest -> newest). Shown in a modal on demand.
+  const trace = r?.trace || [];
+  const [traceOpen, setTraceOpen] = useState(false);
 
   return (
     <div className="mono-sm mt-1.5 p-2" style={{ background: "#0b1013", border: "1px solid var(--border)", borderRadius: 6 }}>
@@ -450,17 +490,17 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
       ))}
 
       {trace.length > 0 && (
-        <div className="mt-2" style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }}>
-          <div style={{ color: "var(--muted)", marginBottom: 3 }}>活动追踪</div>
-          <div>
-            {trace.map((ev, i) => (
-              <div key={i} className="flex gap-2" style={{ lineHeight: 1.5 }}>
-                <span style={{ color: "var(--muted)", minWidth: 56, flexShrink: 0 }}>{fmtClock(ev.t)}</span>
-                <span style={{ wordBreak: "break-all" }}>{ev.m}</span>
-              </div>
-            ))}
-          </div>
+        <div className="mt-2" style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }} onClick={(e) => e.stopPropagation()}>
+          <button className="btn" style={{ padding: "2px 8px" }}
+            title="查看 rescue 的完整活动追踪（下载/启动/命令获取与执行）"
+            onClick={() => setTraceOpen(true)}>
+            活动追踪 ({trace.length})
+          </button>
         </div>
+      )}
+
+      {traceOpen && (
+        <TraceModal nodeId={nodeId} trace={trace} onClose={() => setTraceOpen(false)} />
       )}
 
       {r?.live && (

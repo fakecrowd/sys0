@@ -71,6 +71,7 @@ func (h *Hub) Router() http.Handler {
 	auth.DELETE("/nodes/:id", h.apiNodeDelete)
 	auth.POST("/dispatch", h.apiDispatch)
 	auth.GET("/metrics", h.apiMetrics)
+	auth.GET("/cache", h.apiCacheStatus) // hub release-binary cache status
 	auth.GET("/audit", h.apiAudit)
 	auth.GET("/events", h.apiEvents)
 
@@ -86,6 +87,7 @@ func (h *Hub) Router() http.Handler {
 	admin.DELETE("/users/:id", h.apiDeleteUser)
 	admin.GET("/settings/default-access", h.apiGetDefaultAccess)
 	admin.POST("/settings/default-access", h.apiSetDefaultAccess)
+	admin.POST("/cache/refresh", h.apiCacheRefresh) // force re-pull latest release binaries
 
 	// --- MCP (reuse the net/http handler) ---
 	r.Any("/mcp", gin.WrapF(h.mcpHandler))

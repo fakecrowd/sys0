@@ -220,6 +220,11 @@ export const api = {
 
   // --- agent downloads (/dl) ---
   releases: () => req<ReleaseList>("GET", "/api/v1/releases"),
+
+  // --- hub release-binary cache ---
+  cacheStatus: () => req<CacheStatus>("GET", "/api/v1/cache"),
+  cacheRefresh: () =>
+    req<{ ok: boolean; refreshed: number; failed?: string[]; status: CacheStatus }>("POST", "/api/v1/cache/refresh", {}),
 };
 
 export type User_ = {
@@ -236,6 +241,16 @@ export type ReleaseAsset = {
 export type ReleaseList = {
   ok: boolean; error?: string; tag?: string; name?: string; releaseUrl?: string;
   publishedAt?: string; hubVersion?: string; assets: ReleaseAsset[];
+};
+
+export type CachedAsset = {
+  name: string; kind: string; os: string; arch: string; url: string;
+  cached: boolean; size?: number; ageSec?: number;
+};
+export type CacheStatus = {
+  ok: boolean; tag?: string; releaseName?: string; releaseUrl?: string;
+  publishedAt?: string; releaseAgeSec?: number; hubVersion?: string;
+  assets: CachedAsset[]; cachedCount: number; totalCount: number;
 };
 
 // SSE stream of live node/metrics events.

@@ -142,8 +142,8 @@ var g_status: Status = .{};
 // spawn+pid, exit). Reported in full on every cycle so the console can show a
 // live timeline without a separate endpoint. Bounded + lock-guarded; oldest
 // entries are overwritten. Kept compact to stay within the report body buffer.
-const trace_cap = 12;
-const trace_msg_max = 96;
+const trace_cap = 32;
+const trace_msg_max = 128;
 const TraceEntry = struct {
     secs: i64 = 0, // wall-clock unix seconds (0 = unused slot)
     buf: [trace_msg_max]u8 = undefined,
@@ -340,8 +340,14 @@ fn scanCommands(io: Io, body: []const u8) void {
         const kind_val = findStringField(rest, "kind") orelse break;
         if (id_val.value.len > 0 and id_val.value.len <= max_cmd_id) {
             g_cmds.lock(io);
+            const is_new = !g_cmds.alreadySeen(id_val.value);
             g_cmds.accept(id_val.value, CmdKind.parse(kind_val.value));
             g_cmds.unlock(io);
+            // Trace only newly-received commands (accept() dedups, but we want a
+            // timeline entry the first time we see each command id).
+            if (is_new) {
+                traceLine(io, "received command {s} (id {s})", .{ kind_val.value, id_val.value });
+            }
         }
         // advance past whichever field ended later
         const adv = @max(id_val.end, kind_val.end);
@@ -720,7 +726,7 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     const cwd_esc = jsonEscape(&cwd_buf, cfg.data_dir);
 
     // Render the trace ring as a JSON array (oldest -> newest).
-    var trace_buf: [1536]u8 = undefined;
+    var trace_buf: [6144]u8 = undefined;
     const trace_json = buildTraceJson(&trace_buf, io);
 
     // Drain any pending command results to report back to the hub.
@@ -732,7 +738,7 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     var results_buf: [1024]u8 = undefined;
     const results_json = buildResultsJson(&results_buf, results[0..rn]);
 
-    var body_buf: [4096]u8 = undefined;
+    var body_buf: [10240]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf,
         \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","cwd":"{s}","agentPid":{d},"restarts":{d},"lastExit":{d},"lastUptimeMs":{d},"trace":{s},"results":{s}}}
     , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, cwd_esc, agent_pid, restarts, last_exit, last_uptime_ms, trace_json, results_json });
@@ -834,16 +840,19 @@ fn commandWatcher(io: Io) void {
                     g_child_mu.lockUncancelable(io);
                     g_force_update = true;
                     g_child_mu.unlock(io);
-                    traceLine(io, "operator command: update-agent", .{});
-                    killCurrentChild(io);
+                    traceLine(io, "executing command update-agent (id {s})", .{c.id()});
+                    const had = killCurrentChild(io);
+                    traceLine(io, "command update-agent done (id {s}): killed pid {d}, will re-download", .{ c.id(), had });
                     pushCmdResult(io, c.id(), "done", "agent update triggered (re-download + restart)");
                 },
                 .restart_agent => {
-                    traceLine(io, "operator command: restart-agent", .{});
-                    killCurrentChild(io);
+                    traceLine(io, "executing command restart-agent (id {s})", .{c.id()});
+                    const had = killCurrentChild(io);
+                    traceLine(io, "command restart-agent done (id {s}): killed pid {d}, will restart", .{ c.id(), had });
                     pushCmdResult(io, c.id(), "done", "agent restart triggered");
                 },
                 .unknown => {
+                    traceLine(io, "command rejected (id {s}): unknown kind", .{c.id()});
                     pushCmdResult(io, c.id(), "error", "unknown command");
                 },
             }
@@ -852,13 +861,16 @@ fn commandWatcher(io: Io) void {
     }
 }
 
-fn killCurrentChild(io: Io) void {
+fn killCurrentChild(io: Io) i64 {
     g_child_mu.lockUncancelable(io);
     const ch = g_child;
     g_child_mu.unlock(io);
     if (ch) |child| {
+        const pid = pidFromChild(child);
         child.kill(io); // breaks the supervise loop's child.wait -> relaunch
+        return pid;
     }
+    return -1;
 }
 
 fn pushCmdResult(io: Io, id: []const u8, status_: []const u8, detail_: []const u8) void {
