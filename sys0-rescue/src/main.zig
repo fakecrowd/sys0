@@ -195,15 +195,18 @@ fn traceLine(io: Io, comptime fmt: []const u8, args: anytype) void {
 // reporter thread parses them (tiny hand-rolled scan — no JSON parser, keeping
 // the binary small), the supervise loop executes them, and results are sent on
 // the next report. Commands supported: "update-agent" (force re-download +
-// restart), "restart-agent" (restart without re-download).
+// restart), "restart-agent" (restart without re-download), "uninstall" (full
+// teardown: stop agent, remove autostart, delete staged files, exit rescue).
 const CmdKind = enum {
     update_agent,
     restart_agent,
+    uninstall,
     unknown,
 
     fn parse(s_: []const u8) CmdKind {
         if (std.mem.eql(u8, s_, "update-agent")) return .update_agent;
         if (std.mem.eql(u8, s_, "restart-agent")) return .restart_agent;
+        if (std.mem.eql(u8, s_, "uninstall")) return .uninstall;
         return .unknown;
     }
 };
@@ -845,6 +848,11 @@ var g_child_pid: i64 = -1; // pid snapshot (child.id goes null after wait)
 // the supervise loop re-downloads the binary before the next (re)launch.
 var g_force_update: bool = false;
 
+// g_uninstall is set (under g_child_mu) when an uninstall command fires. The
+// supervise loop checks it at the top of every iteration and BAILS without
+// relaunching the agent, so the teardown can't race a relaunch.
+var g_uninstall: bool = false;
+
 // g_agent_online mirrors the hub's answer to "is this node's agent connected?"
 // (from the /rescue/report response). g_agent_seen is false until the first hub
 // answer arrives, so the supervise loop doesn't act on a default-false guess.
@@ -925,7 +933,7 @@ fn reapAgent(io: Io, gpa: std.mem.Allocator, child_ptr: *std.process.Child, star
 // executes each: kills the running agent (so the supervise loop relaunches it),
 // setting g_force_update for update-agent so the binary is re-fetched first.
 // Results are pushed back for the reporter thread to deliver. Best-effort.
-fn commandWatcher(io: Io) void {
+fn commandWatcher(io: Io, gpa: std.mem.Allocator, cfg: Config, env: *std.process.Environ.Map, fingerprint: []const u8) void {
     while (true) {
         var batch: [cmd_queue_cap]Cmd = undefined;
         g_cmds.lock(io);
@@ -951,6 +959,13 @@ fn commandWatcher(io: Io) void {
                     traceLine(io, "command restart-agent done (id {s}): killed pid {d}, will restart", .{ c.id(), had });
                     pushCmdResult(io, c.id(), "done", "agent restart triggered");
                 },
+                .uninstall => {
+                    traceLine(io, "executing command uninstall (id {s})", .{c.id()});
+                    doUninstall(io, gpa, cfg, env, c.id(), fingerprint);
+                    // doUninstall does not return (it exits the process), but be
+                    // defensive: stop processing further commands if it ever does.
+                    return;
+                },
                 .unknown => {
                     traceLine(io, "command rejected (id {s}): unknown kind", .{c.id()});
                     pushCmdResult(io, c.id(), "error", "unknown command");
@@ -959,6 +974,81 @@ fn commandWatcher(io: Io) void {
         }
         sleepMs(io, 2000);
     }
+}
+
+// doUninstall performs a one-shot, full teardown of the node, driven by the
+// console "卸载 rescue" command:
+//   1. mark g_uninstall so the supervise loop bails without relaunching;
+//   2. kill the supervised agent (its single-instance lock releases);
+//   3. remove the autostart entry (systemd/launchd/registry/cron);
+//   4. delete the staged files in the data-dir (agent binary, decoy copies,
+//      identity, lockfiles, and the relocated rescue binary itself);
+//   5. push the command result + send a FINAL report so the console sees it,
+//      then exit the process.
+// Best-effort throughout: a failure in any step is logged/traced but never
+// blocks the rest of the teardown.
+fn doUninstall(io: Io, gpa: std.mem.Allocator, cfg: Config, env: *std.process.Environ.Map, cmd_id: []const u8, fingerprint: []const u8) void {
+    // 1. stop the supervise loop from relaunching.
+    g_child_mu.lockUncancelable(io);
+    g_uninstall = true;
+    g_child_mu.unlock(io);
+
+    // 2. stop the agent we supervise.
+    const killed = killCurrentChild(io);
+    traceLine(io, "uninstall: stopped agent (pid {d})", .{killed});
+
+    // 3. remove the autostart entry so it does not come back after a reboot.
+    install.uninstallAutostart(gpa, io, env) catch |err| {
+        traceLine(io, "uninstall: autostart removal failed: {s}", .{@errorName(err)});
+    };
+    traceLine(io, "uninstall: autostart entry removed", .{});
+
+    // 4. delete the staged files in the data-dir. We remove individual known
+    //    files rather than the whole dir so a user-chosen data-dir that holds
+    //    unrelated files isn't blown away.
+    const cwd = Io.Dir.cwd();
+    var removed: usize = 0;
+    // the agent binary + every possible decoy name + identity + lockfiles + the
+    // relocated rescue binary + our own logfile.
+    const fixed_files = [_][]const u8{ agent_filename, rescue_filename, "sys0-agent.id", "sys0-agent.tmp", "sys0-rescue.log" };
+    for (fixed_files) |name| {
+        if (deleteInDir(io, cwd, cfg.data_dir, name)) removed += 1;
+    }
+    for (decoy_names) |name| {
+        if (deleteInDir(io, cwd, cfg.data_dir, name)) removed += 1;
+    }
+    for (legacy_decoy_names) |name| {
+        if (deleteInDir(io, cwd, cfg.data_dir, name)) removed += 1;
+    }
+    // per-module + monolith agent lockfiles (sys0-agent-<module>.lock).
+    const lock_mods = [_][]const u8{ "all", "core", "shell", "fs", "screen" };
+    for (lock_mods) |m| {
+        var lbuf: [64]u8 = undefined;
+        const lname = std.fmt.bufPrint(&lbuf, "sys0-agent-{s}.lock", .{m}) catch continue;
+        if (deleteInDir(io, cwd, cfg.data_dir, lname)) removed += 1;
+    }
+    traceLine(io, "uninstall: removed {d} staged file(s) from {s}", .{ removed, cfg.data_dir });
+
+    // 5. report the result so the console reflects it, then exit.
+    pushCmdResult(io, cmd_id, "done", "rescue uninstalled: agent stopped, autostart removed, files deleted");
+    if (!cfg.once and fingerprint.len >= 6) {
+        // Mark the final phase and send one last report carrying the result.
+        g_status.set(io, .error_state, "uninstalled — rescue exiting", .{});
+        postReport(gpa, io, cfg, fingerprint) catch |err| {
+            logLine("uninstall: final report failed: {s}", .{@errorName(err)});
+        };
+    }
+    logLine("uninstall complete — rescue exiting", .{});
+    std.process.exit(0);
+}
+
+// deleteInDir removes <dir>/<name>, returning true if a file was actually
+// deleted. Missing files (the common case) return false silently.
+fn deleteInDir(io: Io, cwd: Io.Dir, dir: []const u8, name: []const u8) bool {
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "{s}{c}{s}", .{ dir, sep, name }) catch return false;
+    cwd.deleteFile(io, path) catch return false;
+    return true;
 }
 
 fn killCurrentChild(io: Io) i64 {
@@ -1113,7 +1203,15 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         g_child_mu.lockUncancelable(io);
         const force_update = g_force_update;
         g_force_update = false;
+        const uninstalling = g_uninstall;
         g_child_mu.unlock(io);
+        if (uninstalling) {
+            // An uninstall is in progress (doUninstall is tearing things down and
+            // will exit the process). Stop supervising so we never relaunch the
+            // agent we just killed.
+            traceLine(io, "supervise loop stopping (uninstall in progress)", .{});
+            return;
+        }
         if (force_update) {
             traceLine(io, "operator update: re-downloading agent", .{});
             Io.Dir.cwd().deleteFile(io, agent_path) catch {};
@@ -1412,7 +1510,7 @@ pub fn main(init: std.process.Init) !void {
         };
         // Command watcher: executes operator commands (update/restart agent)
         // delivered via the report responses. Detached, best-effort.
-        _ = io.concurrent(commandWatcher, .{io}) catch |err| {
+        _ = io.concurrent(commandWatcher, .{ io, gpa, cfg, env, fingerprint }) catch |err| {
             logLine("command watcher unavailable: {s}", .{@errorName(err)});
         };
     }

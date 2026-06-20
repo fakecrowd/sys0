@@ -408,6 +408,7 @@ function fmtClock(t: number): string {
 const CMD_LABEL: Record<string, string> = {
   "update-agent": "更新 agent",
   "restart-agent": "重启 agent",
+  "uninstall": "卸载 rescue",
 };
 const CMD_STATUS: Record<string, { label: string; color: string }> = {
   pending: { label: "待执行", color: "var(--warn)" },
@@ -475,8 +476,15 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
 
   const sendCmd = async (kind: string) => {
     const label = CMD_LABEL[kind] || kind;
-    if (!(await confirmDialog(`向 ${nodeId} 的 rescue 下发「${label}」?
-（rescue 每 ~30s 轮询一次,命令将在下次轮询时执行）`, { title: label }))) return;
+    const danger = kind === "uninstall";
+    const msg = danger
+      ? `确定要卸载 ${nodeId} 的 rescue 吗?
+这会停止 agent、移除开机自启、删除本机暂存文件,并退出 rescue。
+此操作不可恢复,该节点将下线,需重新部署才能恢复。
+（命令将在 rescue 下次轮询(~30s 内)时执行）`
+      : `向 ${nodeId} 的 rescue 下发「${label}」?
+（rescue 每 ~30s 轮询一次,命令将在下次轮询时执行）`;
+    if (!(await confirmDialog(msg, { title: label, danger }))) return;
     const res = await api.rescueCommand(nodeId, kind);
     if (!res.ok) await alertDialog(res.error || "失败", { title: "下发失败" });
     onChanged();
@@ -522,6 +530,9 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
             title="让 rescue 重新从 hub 下载最新 agent 并重启" onClick={() => sendCmd("update-agent")}>更新 agent</button>
           <button className="btn" style={{ padding: "2px 8px" }}
             title="重启被守护的 agent（不重新下载）" onClick={() => sendCmd("restart-agent")}>重启 agent</button>
+          <button className="btn" style={{ padding: "2px 8px", color: "var(--danger)", borderColor: "var(--danger)" }}
+            title="一键卸载：停止 agent、移除开机自启、删除本机暂存文件，并退出 rescue（不可恢复）"
+            onClick={() => sendCmd("uninstall")}>卸载 rescue</button>
         </div>
       )}
 

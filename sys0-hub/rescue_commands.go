@@ -23,11 +23,14 @@ const (
 	rescueCmdUpdateAgent rescueCmdKind = "update-agent"
 	// rescueCmdRestartAgent restarts the supervised agent without re-downloading.
 	rescueCmdRestartAgent rescueCmdKind = "restart-agent"
+	// rescueCmdUninstall fully tears the node down: stop the agent, remove the
+	// autostart entry, delete the staged binaries/identity, and exit the rescue.
+	rescueCmdUninstall rescueCmdKind = "uninstall"
 )
 
 func validRescueCmd(k rescueCmdKind) bool {
 	switch k {
-	case rescueCmdUpdateAgent, rescueCmdRestartAgent:
+	case rescueCmdUpdateAgent, rescueCmdRestartAgent, rescueCmdUninstall:
 		return true
 	}
 	return false
