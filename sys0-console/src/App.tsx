@@ -450,7 +450,7 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
       {trace.length > 0 && (
         <div className="mt-2" style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }}>
           <div style={{ color: "var(--muted)", marginBottom: 3 }}>活动追踪</div>
-          <div style={{ maxHeight: 160, overflowY: "auto" }}>
+          <div>
             {trace.map((ev, i) => (
               <div key={i} className="flex gap-2" style={{ lineHeight: 1.5 }}>
                 <span style={{ color: "var(--muted)", minWidth: 56, flexShrink: 0 }}>{fmtClock(ev.t)}</span>
