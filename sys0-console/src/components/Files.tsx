@@ -18,6 +18,11 @@ export function Files({ node, os }: { node: string; os: string }) {
   const [entries, setEntries] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  // upload progress: null = idle; otherwise live transfer state + a small log.
+  const [up, setUp] = useState<null | {
+    name: string; sent: number; total: number; done: boolean; failed: boolean;
+  }>(null);
+  const [uplog, setUplog] = useState<string[]>([]);
 
   // --- windows path helpers ---
   const driveOf = (p: string) => { const m = /^([A-Za-z]:)/.exec(p); return m ? m[1] + "\\" : ""; };
@@ -100,10 +105,41 @@ export function Files({ node, os }: { node: string; os: string }) {
     catch (e) { alertDialog(String(e), { title: "删除失败" }); }
   };
 
+  // Chunked upload with live progress + a small trace log. Each chunk is one
+  // fs.put dispatch carrying its byte offset; the first chunk (offset 0)
+  // truncates, later chunks WriteAt their offset on the agent.
+  const CHUNK = 512 * 1024; // 512 KiB per chunk (~683 KiB base64 on the wire)
   const upload = async (file: File) => {
-    const buf = new Uint8Array(await file.arrayBuffer());
-    try { await api.one(node, "fs.put", { path: join(path, file.name), data: b64encode(buf) }); ls(path); }
-    catch (e) { alertDialog(String(e), { title: "上传失败" }); }
+    const dest = join(path, file.name);
+    const total = file.size;
+    const log = (m: string) => setUplog((l) => [...l.slice(-40), `${new Date().toLocaleTimeString()} ${m}`]);
+    setUplog([]);
+    setUp({ name: file.name, sent: 0, total, done: false, failed: false });
+    log(`开始上传 ${file.name}（${fmtSize(total)}）→ ${dest}`);
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      // empty file: single zero-length write so the file is still created.
+      if (total === 0) {
+        await api.one(node, "fs.put", { path: dest, data: "", offset: 0 });
+      }
+      for (let off = 0; off < total; off += CHUNK) {
+        const slice = buf.subarray(off, Math.min(off + CHUNK, total));
+        const res: any = await api.one(node, "fs.put", { path: dest, data: b64encode(slice), offset: off });
+        const sent = Math.min(off + slice.length, total);
+        setUp({ name: file.name, sent, total, done: false, failed: false });
+        const pct = total ? Math.floor((sent / total) * 100) : 100;
+        log(`分片 @${fmtSize(off)} 写入 ${fmtSize(slice.length)}（${pct}%${res?.size != null ? `，节点 ${fmtSize(res.size)}` : ""}）`);
+      }
+      setUp({ name: file.name, sent: total, total, done: true, failed: false });
+      log(`完成 ✓ 共 ${fmtSize(total)}`);
+      ls(path);
+      // auto-clear the bar after a short pause so the success state is visible.
+      setTimeout(() => setUp((u) => (u && u.done ? null : u)), 4000);
+    } catch (e) {
+      setUp((u) => (u ? { ...u, failed: true } : u));
+      log(`失败 ✗ ${String(e)}`);
+      alertDialog(String(e), { title: "上传失败" });
+    }
   };
 
   const atRoot = win ? isDriveRoot(path) : path === "/";
@@ -123,11 +159,41 @@ export function Files({ node, os }: { node: string; os: string }) {
           onChange={(e) => setEdit(e.target.value)} onKeyDown={(e) => e.key === "Enter" && go()} />
         <button className="btn" onClick={go} disabled={busy}>转到</button>
         <button className="btn" onClick={() => ls(parent(path))} disabled={busy || atRoot}>↑ 上级</button>
-        <label className="btn btn-accent" style={{ cursor: "pointer" }}>
-          上传
-          <input type="file" style={{ display: "none" }} onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
+        <label className="btn btn-accent" style={{ cursor: up && !up.done && !up.failed ? "not-allowed" : "pointer", opacity: up && !up.done && !up.failed ? 0.6 : 1 }}>
+          {up && !up.done && !up.failed ? `上传中 ${up.total ? Math.floor((up.sent / up.total) * 100) : 0}%` : "上传"}
+          <input type="file" style={{ display: "none" }} disabled={!!up && !up.done && !up.failed}
+            onChange={(e) => { if (e.target.files?.[0]) upload(e.target.files[0]); e.target.value = ""; }} />
         </label>
       </div>
+
+      {up && (
+        <div className="panel p-2 flex flex-col gap-1">
+          <div className="flex items-center gap-2 mono-sm">
+            <span style={{ flex: 1, color: up.failed ? "var(--danger)" : up.done ? "var(--accent)" : "var(--fg)" }}>
+              {up.failed ? "上传失败" : up.done ? "上传完成" : "上传中"} · {up.name}
+            </span>
+            <span style={{ color: "var(--muted)" }}>
+              {fmtSize(up.sent)} / {fmtSize(up.total)} · {up.total ? Math.floor((up.sent / up.total) * 100) : 100}%
+            </span>
+            {(up.done || up.failed) && (
+              <button className="btn" style={{ padding: "0 7px" }} onClick={() => setUp(null)}>×</button>
+            )}
+          </div>
+          <div style={{ height: 6, background: "var(--border)", borderRadius: 3, overflow: "hidden" }}>
+            <div style={{
+              height: "100%",
+              width: `${up.total ? Math.floor((up.sent / up.total) * 100) : 100}%`,
+              background: up.failed ? "var(--danger)" : "var(--accent)",
+              transition: "width 0.15s ease",
+            }} />
+          </div>
+          {uplog.length > 0 && (
+            <div className="mono-sm" style={{ maxHeight: 96, overflowY: "auto", color: "var(--muted)", marginTop: 2 }}>
+              {uplog.map((line, i) => <div key={i} style={{ lineHeight: 1.5 }}>{line}</div>)}
+            </div>
+          )}
+        </div>
+      )}
       <div className="mono-sm" style={{ color: "var(--muted)" }}>{path || (win ? "盘符" : "/")}</div>
       {err && <div style={{ color: "var(--danger)" }}>{err}</div>}
       <div className="panel flex-1 overflow-auto">

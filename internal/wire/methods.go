@@ -115,8 +115,8 @@ var NodeMethods = []MethodSpec{
 	},
 	{
 		Name: MethodFsPut, Scope: "node", Dangerous: true,
-		Description:  "向被控端写入文件（base64 内联）。",
-		ParamsSchema: obj(map[string]any{"path": str(), "data": str(), "mode": intg()}, "path", "data"),
+		Description:  "向被控端写入文件（base64 内联；支持分片 offset 上传以显示进度）。",
+		ParamsSchema: obj(map[string]any{"path": str(), "data": str(), "mode": intg(), "offset": intg()}, "path", "data"),
 	},
 	{
 		Name: MethodFsRm, Scope: "node", Dangerous: true,

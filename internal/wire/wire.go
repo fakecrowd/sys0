@@ -324,10 +324,25 @@ type ScreenshotResult struct {
 	Tool   string `json:"tool"`    // capture backend used (for diagnostics)
 }
 
+// FsPutParams writes Data (base64) to Path at byte Offset. Chunked uploads send
+// the file as a sequence of FsPut calls with increasing Offset so the console
+// can show progress; the first chunk (Offset 0) creates/truncates the file and
+// later chunks append at their offset. A single-shot upload simply uses Offset 0
+// with the whole file (backward compatible). Mode applies on the first chunk.
 type FsPutParams struct {
-	Path string `json:"path"`
-	Data string `json:"data"` // base64
-	Mode uint32 `json:"mode,omitempty"`
+	Path   string `json:"path"`
+	Data   string `json:"data"` // base64 (this chunk)
+	Mode   uint32 `json:"mode,omitempty"`
+	Offset int64  `json:"offset,omitempty"` // byte offset to write this chunk at
+}
+
+// FsPutResult reports the cumulative file size after this chunk landed, so the
+// console can verify the upload and drive a progress indicator.
+type FsPutResult struct {
+	OK      bool  `json:"ok"`
+	Path    string `json:"path,omitempty"`
+	Written int   `json:"written"` // bytes written by this chunk
+	Size    int64 `json:"size"`    // total file size on disk after this chunk
 }
 
 type FsRmParams struct {

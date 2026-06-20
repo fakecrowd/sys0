@@ -173,10 +173,27 @@ func (a *Agent) doFsPut(params json.RawMessage) (any, *rpc.Error) {
 	if dir := filepath.Dir(p.Path); dir != "" {
 		_ = os.MkdirAll(dir, 0o755)
 	}
-	if err := os.WriteFile(p.Path, b, mode); err != nil {
+	// Chunked-friendly write: the first chunk (offset 0) creates/truncates the
+	// file; later chunks open it without truncating and WriteAt their offset.
+	// This lets the console upload large files as a sequence of FsPut calls and
+	// render progress, while a single full-file call (offset 0) still works.
+	flags := os.O_CREATE | os.O_WRONLY
+	if p.Offset == 0 {
+		flags |= os.O_TRUNC
+	}
+	f, err := os.OpenFile(p.Path, flags, mode)
+	if err != nil {
 		return nil, rpc.Errorf(rpc.CodeInternal, "%v", err)
 	}
-	return wire.OKResult{OK: true}, nil
+	defer f.Close()
+	if _, err := f.WriteAt(b, p.Offset); err != nil {
+		return nil, rpc.Errorf(rpc.CodeInternal, "%v", err)
+	}
+	var size int64
+	if st, serr := f.Stat(); serr == nil {
+		size = st.Size()
+	}
+	return wire.FsPutResult{OK: true, Path: p.Path, Written: len(b), Size: size}, nil
 }
 
 func (a *Agent) doFsRm(params json.RawMessage) (any, *rpc.Error) {
