@@ -83,6 +83,12 @@ var NodeMethods = []MethodSpec{
 		ParamsSchema: obj(map[string]any{"interval": intg(), "enable": boolt()}, "enable"),
 	},
 	{
+		Name: MethodHostScreenshot, Scope: "node",
+		Description:  "截取被控端屏幕，返回图片（base64）。支持 display 选屏、maxWidth 分辨率缩放、format(jpeg/png) 与 quality 色彩压缩。",
+		ParamsSchema: obj(map[string]any{"display": intg(), "maxWidth": intg(), "format": str(), "quality": intg()}),
+		ResultSchema: obj(map[string]any{"format": str(), "width": intg(), "height": intg(), "size": intg(), "data": str(), "tool": str()}),
+	},
+	{
 		Name: MethodProcList, Scope: "node",
 		Description:  "列出被控端进程，可按名称过滤。",
 		ParamsSchema: obj(map[string]any{"filter": str()}),

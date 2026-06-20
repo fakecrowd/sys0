@@ -5,6 +5,7 @@ import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
 import { Files } from "./components/Files";
 import { Monitor } from "./components/Monitor";
+import { Screenshot } from "./components/Screenshot";
 import { Actions } from "./components/Actions";
 import { Audit } from "./components/Audit";
 import { Keys } from "./components/Keys";
@@ -139,6 +140,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
     { key: "proc", title: "进程", render: () => <Processes node={focused} /> },
     { key: "files", title: "文件", render: () => <Files node={focused} os={focusedNode?.host.os || ""} /> },
     { key: "monitor", title: "监控", render: () => <Monitor node={focused} live={live} /> },
+    { key: "screenshot", title: "截屏", render: () => <Screenshot node={focused} /> },
     { key: "actions", title: "动作", render: () => <Actions node={focused} /> },
     { key: "audit", title: "审计", render: () => <Audit /> },
     ...(isAdmin ? [

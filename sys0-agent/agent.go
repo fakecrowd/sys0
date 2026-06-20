@@ -224,6 +224,8 @@ func (a *Agent) handle(ctx context.Context, method string, params json.RawMessag
 		return sampleMetrics(), nil
 	case wire.MethodHostWatch:
 		return a.doHostWatch(params)
+	case wire.MethodHostScreenshot:
+		return a.doScreenshot(params)
 	case wire.MethodProcList:
 		var p wire.ProcListParams
 		decode(params, &p)

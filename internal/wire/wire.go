@@ -25,6 +25,7 @@ const (
 	MethodHostInfo    = "host.info"
 	MethodHostMetrics = "host.metrics"
 	MethodHostWatch   = "host.watch"
+	MethodHostScreenshot = "host.screenshot"
 	MethodProcList    = "proc.list"
 	MethodProcSignal  = "proc.signal"
 	MethodFsLs        = "fs.ls"
@@ -297,6 +298,30 @@ type FsGetResult struct {
 	Path string `json:"path"`
 	Size int64  `json:"size"`
 	Data string `json:"data"` // base64
+}
+
+// ScreenshotParams requests a screen capture from the node. MaxWidth scales the
+// image down preserving aspect ratio (0 = native resolution). Format is
+// "jpeg" (default) or "png"; Quality is the JPEG quality 1..100 (color
+// compression, default 80) and is ignored for png. Display selects which
+// monitor (0-based; <0 or out-of-range = primary/full virtual desktop).
+type ScreenshotParams struct {
+	Display  int    `json:"display,omitempty"`
+	MaxWidth int    `json:"maxWidth,omitempty"`
+	Format   string `json:"format,omitempty"`
+	Quality  int    `json:"quality,omitempty"`
+}
+
+// ScreenshotResult carries the encoded image inline (base64). Width/Height are
+// the FINAL (possibly downscaled) pixel dimensions; Format echoes what was
+// encoded so the console can build the right data: URL.
+type ScreenshotResult struct {
+	Format string `json:"format"` // jpeg | png
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
+	Size   int64  `json:"size"`    // encoded byte length
+	Data   string `json:"data"`    // base64 of the encoded image
+	Tool   string `json:"tool"`    // capture backend used (for diagnostics)
 }
 
 type FsPutParams struct {
