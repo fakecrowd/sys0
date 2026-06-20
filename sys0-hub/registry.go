@@ -124,6 +124,33 @@ func (g *nodeGroup) closeAll() {
 	}
 }
 
+// allPeers returns the peers of every connected module of this node (used to
+// broadcast a lifecycle nudge — e.g. node.shutdown — to all module processes).
+func (g *nodeGroup) allPeers() []*rpc.Peer {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	peers := make([]*rpc.Peer, 0, len(g.conns))
+	for _, c := range g.conns {
+		peers = append(peers, c.peer)
+	}
+	return peers
+}
+
+// moduleOnline reports, per canonical module name, whether a connection serving
+// it is live. A monolith ("all") connection counts as ALL modules online. Used
+// by the rescue report response so a modular rescue knows which module binaries
+// to (re)launch.
+func (g *nodeGroup) moduleOnline() map[string]bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	out := map[string]bool{}
+	_, hasAll := g.conns["all"]
+	for _, name := range wire.Modules {
+		out[name] = hasAll || g.conns[name] != nil
+	}
+	return out
+}
+
 func (g *nodeGroup) view() NodeView {
 	g.mu.Lock()
 	tags := g.tags

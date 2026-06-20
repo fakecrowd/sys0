@@ -290,6 +290,25 @@ func (h *Hub) apiNodeRescueCommand(c *gin.Context) {
 		return
 	}
 	cmd := enqueueRescueCommand(id, kind)
+	// For update/restart, the rescue's own kill path only works on an agent it
+	// SPAWNED (g_child). A decoupled, independently-started agent (or one the
+	// rescue is merely standing by for) has g_child==nil, so the rescue could
+	// never stop it and the update would silently no-op (old version kept
+	// running). Since the hub holds the live agent peer(s), proactively tell the
+	// agent to exit here: it releases its single-instance lock, the rescue sees
+	// the node go offline on its next report, and re-downloads + relaunches the
+	// fresh binary. uninstall does its own teardown, so skip it.
+	if kind == rescueCmdUpdateAgent || kind == rescueCmdRestartAgent {
+		if g := h.reg.get(id); g != nil {
+			for _, peer := range g.allPeers() {
+				go func(pr *rpc.Peer) {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					_, _ = pr.Call(ctx, wire.MethodShutdown, json.RawMessage(`{}`))
+				}(peer)
+			}
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "command": cmd})
 }
 

@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fakecrowd/sys0/internal/wire"
 	"github.com/gin-gonic/gin"
 )
 
@@ -750,11 +751,24 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 	// processes that only learn each other's liveness via the hub, so a rescue
 	// no longer supervises the agent as a child (which restart-spammed whenever a
 	// separately-started agent already held the single-instance lock).
-	agentOnline := h.reg.get(nodeID) != nil
+	g := h.reg.get(nodeID)
+	agentOnline := g != nil
+	// Per-module online state so a MODULAR rescue (supervising core/shell/fs/
+	// screen as separate processes) knows which module binaries to (re)launch.
+	// A monolith connection lights up every module. Absent group => all false.
+	var modulesOnline map[string]bool
+	if g != nil {
+		modulesOnline = g.moduleOnline()
+	} else {
+		modulesOnline = map[string]bool{}
+		for _, m := range wire.Modules {
+			modulesOnline[m] = false
+		}
+	}
 	// nudge consoles so the rescue badge/detail updates without a poll
 	h.reg.broadcast("node", "event.node", gin.H{
 		"event": "rescue", "id": nodeID,
 		"rescueVersion": body.Version, "status": body.Status, "detail": body.Detail,
 	})
-	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID, "commands": pending, "agentOnline": agentOnline})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID, "commands": pending, "agentOnline": agentOnline, "modulesOnline": modulesOnline})
 }
