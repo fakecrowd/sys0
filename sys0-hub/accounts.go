@@ -262,11 +262,70 @@ func cachedReleasePayload() ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	// GitHub caps the assets array EMBEDDED in the release object at 30 entries.
+	// With the per-module agent binaries a release now has 40+ assets, so the
+	// monolith/linux ones get silently dropped and downloads 404. Fetch the
+	// COMPLETE asset list from the paginated assets endpoint and splice it in.
+	raw = withAllAssets(raw)
 	payload := buildReleasePayload(raw, version)
 	dlCache.fetched = time.Now()
 	dlCache.payload = payload
 	dlCache.status = http.StatusOK
 	return payload, nil
+}
+
+// withAllAssets returns the release JSON with its "assets" array replaced by the
+// FULL, paginated asset list (the embedded array is capped at 30 by GitHub). On
+// any error it returns the input unchanged (best-effort — better a partial list
+// than none).
+func withAllAssets(raw []byte) []byte {
+	var rel struct {
+		ID        int64           `json:"id"`
+		AssetsURL string          `json:"assets_url"`
+		Assets    json.RawMessage `json:"assets"`
+	}
+	if err := json.Unmarshal(raw, &rel); err != nil || rel.AssetsURL == "" {
+		return raw
+	}
+	all := []json.RawMessage{}
+	for page := 1; page <= 10; page++ { // hard cap: 10 pages * 100 = 1000 assets
+		url := fmt.Sprintf("%s?per_page=100&page=%d", rel.AssetsURL, page)
+		req, _ := http.NewRequest("GET", url, nil)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("User-Agent", "sys0-hub")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return raw
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		resp.Body.Close()
+		var batch []json.RawMessage
+		if err := json.Unmarshal(body, &batch); err != nil {
+			return raw
+		}
+		all = append(all, batch...)
+		if len(batch) < 100 {
+			break // last page
+		}
+	}
+	if len(all) == 0 {
+		return raw
+	}
+	merged, err := json.Marshal(all)
+	if err != nil {
+		return raw
+	}
+	// splice the full assets array back into the release object.
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return raw
+	}
+	obj["assets"] = merged
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // apiReleases proxies the latest GitHub release's agent assets for the /dl page.
