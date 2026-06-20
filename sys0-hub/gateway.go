@@ -23,14 +23,22 @@ func (h *Hub) serveAgent(conn transport.Conn) {
 	id := sess.nodeID
 	sess.mu.Unlock()
 	if id != "" {
-		h.reg.removeNode(sess)
-		h.store.SetNodeState(id, "offline")
-		h.reg.broadcast("node", "event.node", map[string]any{"event": "offline", "id": id})
+		h.reg.removeModule(sess)
 		sess.mu.Lock()
 		label := sess.label
 		sess.mu.Unlock()
-		h.auditNode(id, "node.offline", label, conn.RemoteAddr())
-		h.log.Info("node offline", "nodeId", id, "err", err)
+		// If OTHER modules of this node are still connected, the node stays
+		// online — broadcast its updated view (one module dropped) instead of an
+		// offline event. Only when the last module drops does the node go offline.
+		if g := h.reg.get(id); g != nil {
+			h.reg.broadcast("node", "event.node", map[string]any{"event": "updated", "node": g.view()})
+			h.log.Info("node module offline", "nodeId", id, "module", sess.module, "err", err)
+		} else {
+			h.store.SetNodeState(id, "offline")
+			h.reg.broadcast("node", "event.node", map[string]any{"event": "offline", "id": id})
+			h.auditNode(id, "node.offline", label, conn.RemoteAddr())
+			h.log.Info("node offline", "nodeId", id, "err", err)
+		}
 	}
 }
 
@@ -78,8 +86,13 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 		}
 	}
 
+	mod := hello.Module
+	if mod == "" {
+		mod = "all"
+	}
 	n.mu.Lock()
 	n.nodeID = id
+	n.module = mod
 	n.label = effLabel
 	n.tags = tags
 	n.host = hello.Host
@@ -89,12 +102,14 @@ func (n *nodeSession) handleRequest(ctx context.Context, method string, params j
 	n.lastSeen = time.Now()
 	n.mu.Unlock()
 
-	if old := n.hub.reg.addNode(n); old != nil && old != n {
-		old.peer.Close() // displace a stale duplicate
+	if old := n.hub.reg.addModule(n); old != nil && old != n {
+		old.peer.Close() // displace a stale same-module duplicate
 	}
 
-	n.hub.log.Info("node online", "nodeId", id, "label", effLabel, "addr", n.conn.RemoteAddr())
-	n.hub.reg.broadcast("node", "event.node", map[string]any{"event": "online", "node": n.view()})
+	n.hub.log.Info("node module online", "nodeId", id, "module", mod, "label", effLabel, "addr", n.conn.RemoteAddr())
+	if g := n.hub.reg.get(id); g != nil {
+		n.hub.reg.broadcast("node", "event.node", map[string]any{"event": "online", "node": g.view()})
+	}
 	n.hub.auditNode(id, "node.online", effLabel, n.conn.RemoteAddr())
 
 	return wire.Welcome{NodeID: id, Heartbeat: 15}, nil

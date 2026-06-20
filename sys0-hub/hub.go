@@ -85,17 +85,17 @@ func (h *Hub) ListNodes() []NodeView {
 	seen := map[string]bool{}
 	for _, r := range records {
 		seen[r.ID] = true
-		if s := h.reg.get(r.ID); s != nil {
-			out = append(out, s.view())
+		if g := h.reg.get(r.ID); g != nil {
+			out = append(out, g.view())
 		} else {
 			out = append(out, nodeViewFromRecord(r))
 		}
 	}
 	// include any online node not yet persisted (shouldn't happen, but be safe)
-	for _, s := range h.reg.listNodes() {
-		if !seen[s.nodeID] {
-			seen[s.nodeID] = true
-			out = append(out, s.view())
+	for _, g := range h.reg.listNodes() {
+		if !seen[g.nodeID] {
+			seen[g.nodeID] = true
+			out = append(out, g.view())
 		}
 	}
 	// include rescue-only nodes: a rescue reporting before its agent has
@@ -126,24 +126,24 @@ func (h *Hub) ListNodesFor(actor Actor) []NodeView {
 }
 
 // resolve turns a Select into target node sessions plus offline error items.
-func (h *Hub) resolve(sel wire.Select, actor Actor) (targets []*nodeSession, offline []wire.DispatchItem) {
+func (h *Hub) resolve(sel wire.Select, actor Actor) (targets []*nodeGroup, offline []wire.DispatchItem) {
 	switch {
 	case len(sel.Nodes) > 0:
 		for _, id := range sel.Nodes {
-			if s := h.reg.get(id); s != nil {
-				targets = append(targets, s)
+			if g := h.reg.get(id); g != nil {
+				targets = append(targets, g)
 			} else {
 				offline = append(offline, wire.DispatchItem{Node: id, OK: false,
 					Error: &wire.DispatchError{Code: rpc.CodeOffline, Message: "node offline"}})
 			}
 		}
 	case len(sel.Tags) > 0:
-		for _, s := range h.reg.listNodes() {
-			s.mu.Lock()
-			tags := s.tags
-			s.mu.Unlock()
+		for _, g := range h.reg.listNodes() {
+			g.mu.Lock()
+			tags := g.tags
+			g.mu.Unlock()
 			if anyTag(tags, sel.Tags) {
-				targets = append(targets, s)
+				targets = append(targets, g)
 			}
 		}
 	case sel.All:
@@ -152,9 +152,9 @@ func (h *Hub) resolve(sel wire.Select, actor Actor) (targets []*nodeSession, off
 	// apply node scope (members are restricted to their allow-list)
 	if !actor.ScopeAll {
 		filtered := targets[:0]
-		for _, s := range targets {
-			if actor.nodeAllowed(s.nodeID) {
-				filtered = append(filtered, s)
+		for _, g := range targets {
+			if actor.nodeAllowed(g.nodeID) {
+				filtered = append(filtered, g)
 			}
 		}
 		targets = filtered
@@ -186,8 +186,8 @@ func (h *Hub) Dispatch(ctx context.Context, actor Actor, p wire.DispatchParams) 
 	}
 
 	if p.DryRun {
-		for _, s := range targets {
-			items = append(items, wire.DispatchItem{Node: s.nodeID, OK: true, Value: json.RawMessage(`{"dryRun":true}`)})
+		for _, g := range targets {
+			items = append(items, wire.DispatchItem{Node: g.nodeID, OK: true, Value: json.RawMessage(`{"dryRun":true}`)})
 		}
 		h.audit(actor, p, len(targets), "dryRun", started)
 		return wire.DispatchResult{Items: items}, nil
@@ -195,14 +195,26 @@ func (h *Hub) Dispatch(ctx context.Context, actor Actor, p wire.DispatchParams) 
 
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	for _, s := range targets {
+	for _, g := range targets {
 		wg.Add(1)
-		go func(s *nodeSession) {
+		go func(g *nodeGroup) {
 			defer wg.Done()
+			item := wire.DispatchItem{Node: g.nodeID}
+			// Route to the connection that serves this method's module. If that
+			// module isn't connected (e.g. screen was AV-quarantined), return a
+			// clear per-node error instead of failing the whole node.
+			peer := g.peerFor(method)
+			if peer == nil {
+				item.Error = &wire.DispatchError{Code: rpc.CodeOffline,
+					Message: "模块 " + wire.MethodModule(method) + " 未连接（可能被拦截/未部署）"}
+				mu.Lock()
+				items = append(items, item)
+				mu.Unlock()
+				return
+			}
 			cctx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
-			res, rerr := s.peer.Call(cctx, method, p.Call.Params)
-			item := wire.DispatchItem{Node: s.nodeID}
+			res, rerr := peer.Call(cctx, method, p.Call.Params)
 			if rerr != nil {
 				item.Error = &wire.DispatchError{Code: rerr.Code, Message: rerr.Message}
 			} else {
@@ -212,7 +224,7 @@ func (h *Hub) Dispatch(ctx context.Context, actor Actor, p wire.DispatchParams) 
 			mu.Lock()
 			items = append(items, item)
 			mu.Unlock()
-		}(s)
+		}(g)
 	}
 	wg.Wait()
 

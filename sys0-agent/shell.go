@@ -1,3 +1,5 @@
+//go:build !modular || mod_shell
+
 package main
 
 import (
@@ -66,6 +68,9 @@ func newShellManager() *shellManager {
 	return &shellManager{sessions: map[string]*shellSession{}}
 }
 
+// shellMgr is the package-global shell session manager (shell module only).
+var shellMgr = newShellManager()
+
 // doShellOpen spawns a persistent PTY shell. Its output is buffered on the agent
 // and streamed to any subscribed console via emit; the session survives console
 // disconnects and can be reattached later (see shell.list / shell.output).
@@ -107,9 +112,9 @@ func (a *Agent) doShellOpen(params json.RawMessage) (any, *rpc.Error) {
 		state: "running", cols: cols, rows: rows,
 		started: time.Now().Unix(), pty: ptmx, cmd: cmd,
 	}
-	a.shells.mu.Lock()
-	a.shells.sessions[id] = sess
-	a.shells.mu.Unlock()
+	shellMgr.mu.Lock()
+	shellMgr.sessions[id] = sess
+	shellMgr.mu.Unlock()
 
 	// Reader: buffer everything, and best-effort stream to the current console.
 	// Crucially it re-fetches the live peer each emit and NEVER tears the shell
@@ -170,9 +175,9 @@ func (a *Agent) doShellInput(params json.RawMessage) (any, *rpc.Error) {
 	if e := decode(params, &p); e != nil {
 		return nil, e
 	}
-	a.shells.mu.Lock()
-	sess := a.shells.sessions[p.Session]
-	a.shells.mu.Unlock()
+	shellMgr.mu.Lock()
+	sess := shellMgr.sessions[p.Session]
+	shellMgr.mu.Unlock()
 	if sess == nil {
 		return nil, rpc.Errorf(rpc.CodeBadParams, "no such session")
 	}
@@ -198,9 +203,9 @@ func (a *Agent) doShellResize(params json.RawMessage) (any, *rpc.Error) {
 	if e := decode(params, &p); e != nil {
 		return nil, e
 	}
-	a.shells.mu.Lock()
-	sess := a.shells.sessions[p.Session]
-	a.shells.mu.Unlock()
+	shellMgr.mu.Lock()
+	sess := shellMgr.sessions[p.Session]
+	shellMgr.mu.Unlock()
 	if sess == nil {
 		return nil, rpc.Errorf(rpc.CodeBadParams, "no such session")
 	}
@@ -226,10 +231,10 @@ func (a *Agent) doShellClose(params json.RawMessage) (any, *rpc.Error) {
 // doShellList returns every persistent shell on the node so a (re)connecting
 // console can reuse an existing session instead of always spawning a new one.
 func (a *Agent) doShellList(params json.RawMessage) (any, *rpc.Error) {
-	a.shells.mu.Lock()
-	defer a.shells.mu.Unlock()
-	out := make([]wire.ShellInfo, 0, len(a.shells.sessions))
-	for _, s := range a.shells.sessions {
+	shellMgr.mu.Lock()
+	defer shellMgr.mu.Unlock()
+	out := make([]wire.ShellInfo, 0, len(shellMgr.sessions))
+	for _, s := range shellMgr.sessions {
 		out = append(out, s.info())
 	}
 	return wire.ShellListResult{Sessions: out}, nil
@@ -242,9 +247,9 @@ func (a *Agent) doShellOutput(params json.RawMessage) (any, *rpc.Error) {
 	if e := decode(params, &p); e != nil {
 		return nil, e
 	}
-	a.shells.mu.Lock()
-	sess := a.shells.sessions[p.Session]
-	a.shells.mu.Unlock()
+	shellMgr.mu.Lock()
+	sess := shellMgr.sessions[p.Session]
+	shellMgr.mu.Unlock()
 	if sess == nil {
 		return nil, rpc.Errorf(rpc.CodeBadParams, "no such session")
 	}
@@ -256,10 +261,10 @@ func (a *Agent) doShellOutput(params json.RawMessage) (any, *rpc.Error) {
 }
 
 func (a *Agent) closeShell(id string) {
-	a.shells.mu.Lock()
-	sess := a.shells.sessions[id]
-	delete(a.shells.sessions, id)
-	a.shells.mu.Unlock()
+	shellMgr.mu.Lock()
+	sess := shellMgr.sessions[id]
+	delete(shellMgr.sessions, id)
+	shellMgr.mu.Unlock()
 	if sess == nil {
 		return
 	}

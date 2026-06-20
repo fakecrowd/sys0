@@ -304,6 +304,7 @@ func (h *Hub) apiRescueRedirect(c *gin.Context) {
 func (h *Hub) serveBinary(c *gin.Context, kind string) {
 	wantOS := strings.ToLower(c.Query("os"))
 	wantArch := strings.ToLower(c.Query("arch"))
+	wantModule := strings.ToLower(c.Query("module")) // "" => monolith/any for agent
 	if wantOS == "" || wantArch == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "os and arch query params required"})
 		return
@@ -313,7 +314,7 @@ func (h *Hub) serveBinary(c *gin.Context, kind string) {
 		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	url, name, ok := assetFor(payload, kind, wantOS, wantArch)
+	url, name, ok := assetFor(payload, kind, wantOS, wantArch, wantModule)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "no " + kind + " asset for " + wantOS + "/" + wantArch})
 		return
@@ -468,24 +469,38 @@ func startBinaryWarmer(log *slog.Logger) {
 
 // assetFor finds the download URL AND filename of the asset with the given
 // kind/os/arch in the compact release payload.
-func assetFor(payload []byte, kind, wantOS, wantArch string) (url, name string, ok bool) {
+func assetFor(payload []byte, kind, wantOS, wantArch, wantModule string) (url, name string, ok bool) {
 	var parsed struct {
 		OK     bool `json:"ok"`
 		Assets []struct {
-			URL  string `json:"url"`
-			Name string `json:"name"`
-			OS   string `json:"os"`
-			Arch string `json:"arch"`
-			Kind string `json:"kind"`
+			URL    string `json:"url"`
+			Name   string `json:"name"`
+			OS     string `json:"os"`
+			Arch   string `json:"arch"`
+			Kind   string `json:"kind"`
+			Module string `json:"module"`
 		} `json:"assets"`
 	}
 	if err := json.Unmarshal(payload, &parsed); err != nil || !parsed.OK {
 		return "", "", false
 	}
 	for _, a := range parsed.Assets {
-		if a.Kind == kind && a.OS == wantOS && a.Arch == wantArch && a.URL != "" {
-			return a.URL, a.Name, true
+		if a.Kind != kind || a.OS != wantOS || a.Arch != wantArch || a.URL == "" {
+			continue
 		}
+		// For agent assets, match the requested module. An empty wantModule means
+		// the caller wants the monolith ("all"); a specific module (core/shell/
+		// fs/screen) matches that module binary.
+		if kind == "agent" {
+			want := wantModule
+			if want == "" {
+				want = "all"
+			}
+			if a.Module != want {
+				continue
+			}
+		}
+		return a.URL, a.Name, true
 	}
 	return "", "", false
 }

@@ -1,3 +1,5 @@
+//go:build !modular || mod_shell
+
 package main
 
 import (
@@ -60,9 +62,9 @@ func TestShellCloseNoRace(t *testing.T) {
 	// and mark the sessions exited. No panic => the crash is fixed.
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		a.shells.mu.Lock()
-		left := len(a.shells.sessions)
-		a.shells.mu.Unlock()
+		shellMgr.mu.Lock()
+		left := len(shellMgr.sessions)
+		shellMgr.mu.Unlock()
 		if left == 0 {
 			break
 		}

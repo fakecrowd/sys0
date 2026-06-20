@@ -1,3 +1,5 @@
+//go:build !modular || mod_screen
+
 package main
 
 // screenshot.go — CGO-free screen capture for the agent.

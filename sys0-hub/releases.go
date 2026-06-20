@@ -61,6 +61,17 @@ func buildReleasePayload(raw []byte, hubVersion string) []byte {
 			continue
 		}
 		osName, arch := parseTargetFromName(a.Name)
+		// module dimension for agent assets: "all" for the monolith
+		// (sys0-agent_…), or the parsed module (core|shell|fs|screen) for a
+		// sys0-agentmod-<module>_… binary. Empty for rescue.
+		module := ""
+		if kind == "agent" {
+			if m := parseModuleFromName(a.Name); m != "" {
+				module = m
+			} else {
+				module = "all"
+			}
+		}
 		assets = append(assets, map[string]any{
 			"name":          a.Name,
 			"url":           a.BrowserDownloadURL,
@@ -69,6 +80,7 @@ func buildReleasePayload(raw []byte, hubVersion string) []byte {
 			"os":            osName,
 			"arch":          arch,
 			"kind":          kind,
+			"module":        module,
 		})
 	}
 	out["assets"] = assets
@@ -78,6 +90,20 @@ func buildReleasePayload(raw []byte, hubVersion string) []byte {
 
 // parseTargetFromName extracts os/arch from an asset filename like
 // "sys0_202606181025_linux_amd64.tar.gz" (best-effort).
+// parseModuleFromName extracts the module from a sys0-agentmod-<module>_... name.
+func parseModuleFromName(name string) string {
+	const pfx = "sys0-agentmod-"
+	i := strings.Index(name, pfx)
+	if i < 0 {
+		return ""
+	}
+	rest := name[i+len(pfx):]
+	if j := strings.IndexByte(rest, '_'); j >= 0 {
+		return rest[:j]
+	}
+	return ""
+}
+
 func parseTargetFromName(name string) (osName, arch string) {
 	for _, o := range []string{"linux", "darwin", "windows"} {
 		if strings.Contains(name, o) {

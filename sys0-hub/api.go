@@ -224,7 +224,7 @@ func (h *Hub) apiNodeDetach(c *gin.Context) {
 		return
 	}
 	if s := h.reg.get(c.Param("id")); s != nil {
-		s.peer.Close()
+		s.closeAll()
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -522,7 +522,7 @@ func (h *Hub) consoleHandler(sess *consoleSession, actor Actor) rpc.Handler {
 				return nil, rpc.Errorf(rpc.CodeForbidden, "node not permitted")
 			}
 			if s := h.reg.get(p.Node); s != nil {
-				s.peer.Close()
+				s.closeAll()
 			}
 			return wire.OKResult{OK: true}, nil
 		case "hub.subscribe":

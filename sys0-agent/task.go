@@ -1,3 +1,5 @@
+//go:build !modular || mod_shell
+
 package main
 
 import (
@@ -60,6 +62,9 @@ type taskManager struct {
 
 func newTaskManager() *taskManager { return &taskManager{tasks: map[string]*managedTask{}} }
 
+// taskMgr is the package-global managed-task manager (shell module only).
+var taskMgr = newTaskManager()
+
 // shellArgs returns the OS shell invocation for a command line.
 func shellArgs(cmdline string) (string, []string) {
 	if runtime.GOOS == "windows" {
@@ -87,9 +92,9 @@ func (a *Agent) doTaskStart(params json.RawMessage) (any, *rpc.Error) {
 	if e := a.launchTask(t); e != nil {
 		return nil, e
 	}
-	a.tasks.mu.Lock()
-	a.tasks.tasks[t.id] = t
-	a.tasks.mu.Unlock()
+	taskMgr.mu.Lock()
+	taskMgr.tasks[t.id] = t
+	taskMgr.mu.Unlock()
 	return wire.TaskStartResult{Task: t.id}, nil
 }
 
@@ -219,10 +224,10 @@ func (a *Agent) doTaskSignal(params json.RawMessage) (any, *rpc.Error) {
 }
 
 func (a *Agent) doTaskList(params json.RawMessage) (any, *rpc.Error) {
-	a.tasks.mu.Lock()
-	defer a.tasks.mu.Unlock()
-	out := make([]wire.TaskInfo, 0, len(a.tasks.tasks))
-	for _, t := range a.tasks.tasks {
+	taskMgr.mu.Lock()
+	defer taskMgr.mu.Unlock()
+	out := make([]wire.TaskInfo, 0, len(taskMgr.tasks))
+	for _, t := range taskMgr.tasks {
 		out = append(out, t.info())
 	}
 	return wire.TaskListResult{Tasks: out}, nil
@@ -272,17 +277,17 @@ func (a *Agent) doTaskRemove(params json.RawMessage) (any, *rpc.Error) {
 	t := a.getTask(p.Task)
 	if t != nil {
 		a.stopTask(t, "KILL")
-		a.tasks.mu.Lock()
-		delete(a.tasks.tasks, t.id)
-		a.tasks.mu.Unlock()
+		taskMgr.mu.Lock()
+		delete(taskMgr.tasks, t.id)
+		taskMgr.mu.Unlock()
 	}
 	return wire.OKResult{OK: true}, nil
 }
 
 func (a *Agent) getTask(id string) *managedTask {
-	a.tasks.mu.Lock()
-	defer a.tasks.mu.Unlock()
-	return a.tasks.tasks[id]
+	taskMgr.mu.Lock()
+	defer taskMgr.mu.Unlock()
+	return taskMgr.tasks[id]
 }
 
 func (a *Agent) stopTask(t *managedTask, sig string) {

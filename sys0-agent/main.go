@@ -40,7 +40,7 @@ func main() {
 
 	log := newLogger(dataDir)
 	// single-instance lock: refuse to start if another agent owns this dir
-	lock, err := acquireLock(dataDir)
+	lock, err := acquireLock(dataDir, module)
 	if err != nil {
 		log.Error("startup", "err", err)
 		os.Exit(1)

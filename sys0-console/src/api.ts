@@ -30,6 +30,12 @@ export type RescueInfo = {
   commands?: RescueCommand[]; // recent operator commands + their status
 };
 
+export type ModuleView = {
+  name: string;
+  online: boolean;
+  version?: string;
+};
+
 export type Node = {
   id: string;
   label: string;
@@ -40,6 +46,7 @@ export type Node = {
   lastSeen: number;
   agentCwd?: string; // agent's working directory
   agentPid?: number; // agent's own pid
+  modules?: ModuleView[]; // per-module connection state
   rescue?: boolean;
   rescueVersion?: string;
   rescueInfo?: RescueInfo | null;

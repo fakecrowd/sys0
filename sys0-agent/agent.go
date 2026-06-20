@@ -17,6 +17,27 @@ import (
 // version is the build version (yyyyMMddhhmm), injected via -ldflags.
 var version = "dev"
 
+// module is THIS binary's identity, injected at link time via
+//   -ldflags "-X main.module=screen"
+// "all" (the default monolith, used by the bundled tarball agent) is built with
+// no build tags, so every module's code compiles in. The rescue ships one binary
+// PER module, built with -tags "modular mod_<name>", which physically EXCLUDES
+// the other modules' (high AV-signal) code — that's the point of the split: AV
+// quarantining the screen binary can't touch the shell/fs/core binaries because
+// they don't contain that code. The hub re-aggregates a node's module
+// connections by their shared fingerprint.
+var module = "all"
+
+// methodHandler is a registered node-method implementation. Each module's
+// handlers register themselves from an init() in that module's build-tagged
+// file, so a binary only knows the methods it was compiled with.
+type methodHandler func(a *Agent, ctx context.Context, params json.RawMessage) (any, *rpc.Error)
+
+var methodHandlers = map[string]methodHandler{}
+
+// registerMethod records a handler. Called from module init() functions.
+func registerMethod(name string, fn methodHandler) { methodHandlers[name] = fn }
+
 // Config holds agent runtime configuration.
 type Config struct {
 	Hub       string // host:port
@@ -38,8 +59,6 @@ type Agent struct {
 	nodeID      string
 	peer        *rpc.Peer
 	watchStop   chan struct{}
-	shells      *shellManager
-	tasks       *taskManager
 
 	reconnect chan struct{}
 	quit      bool
@@ -55,8 +74,6 @@ func NewAgent(cfg Config, fingerprint string, log *slog.Logger) *Agent {
 		cfg: cfg, log: log,
 		label: cfg.Label, heartbeat: hb,
 		fingerprint: fingerprint,
-		shells:      newShellManager(),
-		tasks:       newTaskManager(),
 		reconnect:   make(chan struct{}, 1),
 	}
 }
@@ -118,7 +135,7 @@ func (a *Agent) session(ctx context.Context) error {
 	// handshake
 	hi := hostInfo()
 	hello := wire.Hello{
-		Key: a.cfg.Key, Fingerprint: a.fingerprint, Label: a.label,
+		Key: a.cfg.Key, Fingerprint: a.fingerprint, Module: module, Label: a.label,
 		Host:         wire.HostSummary{Name: hi.Hostname, OS: hi.OS, Arch: hi.Arch, Kernel: hi.Kernel, IP: hi.IP},
 		AgentVersion: version,
 		Cwd:          hi.Cwd,
@@ -187,61 +204,8 @@ var asyncMethods = map[string]bool{
 
 // handle dispatches inbound requests from the hub.
 func (a *Agent) handle(ctx context.Context, method string, params json.RawMessage) (any, *rpc.Error) {
+	// Lifecycle methods are served by every module regardless of build tags.
 	switch method {
-	case wire.MethodShellRun:
-		return a.doShellRun(ctx, params)
-	case wire.MethodShellOpen:
-		return a.doShellOpen(params)
-	case wire.MethodShellInput:
-		return a.doShellInput(params)
-	case wire.MethodShellResize:
-		return a.doShellResize(params)
-	case wire.MethodShellClose:
-		return a.doShellClose(params)
-	case wire.MethodShellList:
-		return a.doShellList(params)
-	case wire.MethodShellOutput:
-		return a.doShellOutput(params)
-	case wire.MethodTaskStart:
-		return a.doTaskStart(params)
-	case wire.MethodTaskInput:
-		return a.doTaskInput(params)
-	case wire.MethodTaskResize:
-		return a.doTaskResize(params)
-	case wire.MethodTaskSignal:
-		return a.doTaskSignal(params)
-	case wire.MethodTaskList:
-		return a.doTaskList(params)
-	case wire.MethodTaskOutput:
-		return a.doTaskOutput(params)
-	case wire.MethodTaskRestart:
-		return a.doTaskRestart(params)
-	case wire.MethodTaskRemove:
-		return a.doTaskRemove(params)
-	case wire.MethodHostInfo:
-		return hostInfo(), nil
-	case wire.MethodHostMetrics:
-		return sampleMetrics(), nil
-	case wire.MethodHostWatch:
-		return a.doHostWatch(params)
-	case wire.MethodHostScreenshot:
-		return a.doScreenshot(params)
-	case wire.MethodProcList:
-		var p wire.ProcListParams
-		decode(params, &p)
-		return wire.ProcListResult{Procs: procList(p.Filter)}, nil
-	case wire.MethodProcSignal:
-		return a.doProcSignal(params)
-	case wire.MethodFsLs:
-		return a.doFsLs(params)
-	case wire.MethodFsStat:
-		return a.doFsStat(params)
-	case wire.MethodFsGet:
-		return a.doFsGet(params)
-	case wire.MethodFsPut:
-		return a.doFsPut(params)
-	case wire.MethodFsRm:
-		return a.doFsRm(params)
 	case wire.MethodConfig:
 		return a.doConfig(params)
 	case wire.MethodReconnect:
@@ -250,9 +214,11 @@ func (a *Agent) handle(ctx context.Context, method string, params json.RawMessag
 	case wire.MethodShutdown:
 		go a.doShutdown()
 		return wire.OKResult{OK: true}, nil
-	default:
-		return nil, rpc.Errorf(rpc.CodeNoMethod, "unknown method %q", method)
 	}
+	if fn := methodHandlers[method]; fn != nil {
+		return fn(a, ctx, params)
+	}
+	return nil, rpc.Errorf(rpc.CodeNoMethod, "method %q not served by this module (%s)", method, module)
 }
 
 func (a *Agent) onNotify(method string, params json.RawMessage) {}
@@ -381,7 +347,11 @@ func wsHost(h string) string {
 func capabilities() []string {
 	caps := make([]string, 0, len(wire.NodeMethods))
 	for _, m := range wire.NodeMethods {
-		caps = append(caps, m.Name)
+		_, registered := methodHandlers[m.Name]
+		lifecycle := m.Name == wire.MethodConfig || m.Name == wire.MethodReconnect || m.Name == wire.MethodShutdown
+		if registered || lifecycle {
+			caps = append(caps, m.Name)
+		}
 	}
 	return caps
 }

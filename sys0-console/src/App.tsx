@@ -328,6 +328,18 @@ function NodeCard({
       <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
         agent {n.version || "—"}{n.rescue ? ` · rescue ${n.rescueVersion || "?"}` : ""}
       </div>
+      {!offline && n.modules && n.modules.length > 0 && (
+        <div className="flex items-center gap-1 mt-1 flex-wrap" title="agent 模块连接状态（绿=已连接, 灰=未连接/被拦截）">
+          {n.modules.map((mod) => (
+            <span key={mod.name} className="tag"
+              style={mod.online
+                ? { color: "var(--accent)", borderColor: "var(--accent)" }
+                : { color: "var(--muted)", borderColor: "var(--border)", opacity: 0.6 }}>
+              {mod.online ? "" : "⃠"}{mod.name}
+            </span>
+          ))}
+        </div>
+      )}
       {!offline && (n.agentPid || n.agentCwd) && (
         <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
           {n.agentPid ? `pid ${n.agentPid}` : ""}{n.agentPid && n.agentCwd ? " · " : ""}{n.agentCwd ? `cwd ${n.agentCwd}` : ""}

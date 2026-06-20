@@ -58,6 +58,7 @@ type HostSummary struct {
 type Hello struct {
 	Key          string      `json:"key"`
 	Fingerprint  string      `json:"fingerprint"`
+	Module       string      `json:"module"` // which agent module this connection serves
 	Label        string      `json:"label"`
 	Host         HostSummary `json:"host"`
 	AgentVersion string      `json:"agentVersion"`
