@@ -70,6 +70,13 @@ pub const Config = struct {
     max_backoff_ms: u64 = 60_000,
     healthy_uptime_ms: u64 = 30_000,
     report_every_s: u64 = 30,
+    // How often the supervise loop re-evaluates whether the agent needs
+    // (re)launching, based on the hub-reported online state.
+    check_interval_s: u64 = 5,
+    // After we spawn an agent, wait up to this long for it to connect to
+    // the hub before considering another launch — avoids a redundant spawn
+    // (which would just flock-exit) during a slow cold-start connect.
+    connect_grace_ms: u64 = 25_000,
 };
 
 const Action = enum { run, install, uninstall, help };
@@ -763,6 +770,25 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     }
     const resp = rw.buffered();
     scanCommands(io, resp);
+    // The hub tells us whether THIS node's agent is currently connected. The
+    // rescue and agent are decoupled processes (no parent/child supervision);
+    // this is the sole signal the supervise loop uses to decide whether to
+    // (re)launch the agent. Absent field (older hub) -> leave state unseen.
+    if (findBoolField(resp, "agentOnline")) |online| {
+        setAgentOnline(io, online);
+    }
+}
+
+// findBoolField finds  "name":true/false  in s. Returns null if absent.
+fn findBoolField(s_: []const u8, name: []const u8) ?bool {
+    var pat_buf: [32]u8 = undefined;
+    const pat = std.fmt.bufPrint(&pat_buf, "\"{s}\"", .{name}) catch return null;
+    const k = std.mem.indexOf(u8, s_, pat) orelse return null;
+    var i = k + pat.len;
+    while (i < s_.len and (s_[i] == ' ' or s_[i] == ':')) i += 1;
+    if (i < s_.len and (s_[i] == 't' or s_[i] == 'T')) return true;
+    if (i < s_.len and (s_[i] == 'f' or s_[i] == 'F')) return false;
+    return null;
 }
 
 // buildTraceJson renders the trace ring as a JSON array oldest->newest. Each
@@ -810,15 +836,89 @@ fn buildResultsJson(buf: []u8, results: []const CmdResult) []const u8 {
 // a manual update/restart can interrupt the supervise loop's blocking wait by
 // killing the child. Guarded by g_child_mu.
 var g_child_mu: Io.Mutex = .init;
+// g_child points at the agent process WE spawned (null when we didn't spawn one
+// or it has exited and been reaped). Heap-allocated so it outlives the spawning
+// stack frame; the reaper frees it. All access under g_child_mu.
 var g_child: ?*std.process.Child = null;
+var g_child_pid: i64 = -1; // pid snapshot (child.id goes null after wait)
 // g_force_update is set by the watcher when an update-agent command fires, so
-// the supervise loop re-downloads the binary before the next spawn.
+// the supervise loop re-downloads the binary before the next (re)launch.
 var g_force_update: bool = false;
 
-fn setCurrentChild(io: Io, child: ?*std.process.Child) void {
+// g_agent_online mirrors the hub's answer to "is this node's agent connected?"
+// (from the /rescue/report response). g_agent_seen is false until the first hub
+// answer arrives, so the supervise loop doesn't act on a default-false guess.
+var g_online_mu: Io.Mutex = .init;
+var g_agent_online: bool = false;
+var g_agent_seen: bool = false;
+
+fn setAgentOnline(io: Io, online: bool) void {
+    g_online_mu.lockUncancelable(io);
+    g_agent_online = online;
+    g_agent_seen = true;
+    g_online_mu.unlock(io);
+}
+
+const OnlineState = struct { online: bool, seen: bool };
+fn agentOnlineState(io: Io) OnlineState {
+    g_online_mu.lockUncancelable(io);
+    defer g_online_mu.unlock(io);
+    return .{ .online = g_agent_online, .seen = g_agent_seen };
+}
+
+// currentChildPid returns the pid of the agent WE spawned, or -1 if none alive.
+fn currentChildPid(io: Io) i64 {
     g_child_mu.lockUncancelable(io);
-    g_child = child;
+    defer g_child_mu.unlock(io);
+    return if (g_child != null) g_child_pid else -1;
+}
+
+// reapAgent owns the wait() on a spawned agent (the SINGLE waiter — the command
+// watcher only ever kills, never waits, preserving the one-owner-wait rule). On
+// exit it records the outcome for the console and clears g_child UNDER LOCK
+// before freeing, so a concurrent killCurrentChild (which holds g_child_mu
+// across its kill) can never touch freed memory. Detached, best-effort.
+fn reapAgent(io: Io, gpa: std.mem.Allocator, child_ptr: *std.process.Child, start_ts: Io.Timestamp) void {
+    const term = child_ptr.wait(io) catch |err| {
+        logLine("agent wait failed: {s}", .{@errorName(err)});
+        g_child_mu.lockUncancelable(io);
+        if (g_child == child_ptr) {
+            g_child = null;
+            g_child_pid = -1;
+        }
+        g_child_mu.unlock(io);
+        gpa.destroy(child_ptr);
+        return;
+    };
+    const now_ts = Io.Timestamp.now(io, .awake);
+    const uptime_ms: u64 = @intCast(@max(0, start_ts.durationTo(now_ts).toMilliseconds()));
+    var exit_code: i64 = -1;
+    switch (term) {
+        .exited => |code| {
+            exit_code = code;
+            logLine("agent exited code={d} after {d}ms", .{ code, uptime_ms });
+        },
+        .signal => |sg| {
+            exit_code = -@as(i64, @intFromEnum(sg));
+            logLine("agent killed by signal={d} after {d}ms", .{ @intFromEnum(sg), uptime_ms });
+        },
+        .stopped => |sg| logLine("agent stopped signal={d}", .{@intFromEnum(sg)}),
+        .unknown => |u| logLine("agent ended unknown={d}", .{u}),
+    }
+    g_status.lock(io);
+    g_status.last_exit = exit_code;
+    g_status.last_uptime_ms = uptime_ms;
+    g_status.agent_pid = -1;
+    g_status.unlock(io);
+    traceLine(io, "agent exited code={d} after {d}ms", .{ exit_code, uptime_ms });
+
+    g_child_mu.lockUncancelable(io);
+    if (g_child == child_ptr) {
+        g_child = null;
+        g_child_pid = -1;
+    }
     g_child_mu.unlock(io);
+    gpa.destroy(child_ptr);
 }
 
 // commandWatcher runs on its own thread. It polls the accepted-command queue and
@@ -862,12 +962,13 @@ fn commandWatcher(io: Io) void {
 }
 
 fn killCurrentChild(io: Io) i64 {
+    // Hold the lock across the kill: the reaper only frees the child AFTER
+    // acquiring this same lock to null g_child, so the pointer stays valid here.
     g_child_mu.lockUncancelable(io);
-    const ch = g_child;
-    g_child_mu.unlock(io);
-    if (ch) |child| {
-        const pid = pidFromChild(child);
-        child.kill(io); // breaks the supervise loop's child.wait -> relaunch
+    defer g_child_mu.unlock(io);
+    if (g_child) |child| {
+        const pid = g_child_pid;
+        child.kill(io); // agent exits -> reaper clears g_child -> supervise relaunches
         return pid;
     }
     return -1;
@@ -990,24 +1091,25 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
     // The decoy binary currently in use (a copy of the agent under a low-key
     // name). Cleaned up + regenerated each relaunch.
     var prev_decoy: ?[]const u8 = null;
+    // When we last spawned an agent; used for the post-spawn connect grace.
+    var spawn_ts: ?Io.Timestamp = null;
 
-    // One-time cleanup: older rescue builds impersonated real OS processes and
-    // left those copies behind (svchost.exe, dbus-daemon, …). Those leftover
-    // files are exactly the kind of artifact AV flags, so sweep any that an
-    // earlier version may have dropped in the data dir. Best-effort.
+    // One-time cleanup of legacy impersonation-named decoys an older build left.
     sweepLegacyDecoys(io, cfg.data_dir);
 
+    // DECOUPLED SUPERVISION: the agent and rescue are independent processes. The
+    // agent enforces a single instance per data-dir (flock + exit), so the OLD
+    // model — spawn the agent as a child and relaunch on every child exit —
+    // restart-spammed whenever a separately-started agent already held the lock:
+    // our redundant spawn exited instantly, we saw "crashed", and looped. Now the
+    // ONLY trigger to (re)launch is the hub's answer to "is this node's agent
+    // connected?" (g_agent_online, from the /rescue/report response). We still
+    // spawn+reap the agent we start (so we can kill it for operator restart and
+    // not leak zombies), but child exit no longer drives relaunch — the hub does.
     while (true) {
-        // Clean up the previous run's decoy binary (a renamed copy of the agent)
-        // before building a fresh one for this launch.
-        if (prev_decoy) |d| {
-            Io.Dir.cwd().deleteFile(io, d) catch {};
-            gpa.free(d);
-            prev_decoy = null;
-        }
-
-        // Manual update-agent command: force a re-download by removing the
-        // current binary so ensureAgent fetches the latest from the hub.
+        // Operator update-agent: re-download the binary. The command watcher
+        // already killed our child; just drop the binary and clear grace so we
+        // relaunch the fresh one as soon as the hub shows the agent offline.
         g_child_mu.lockUncancelable(io);
         const force_update = g_force_update;
         g_force_update = false;
@@ -1016,11 +1118,55 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
             traceLine(io, "operator update: re-downloading agent", .{});
             Io.Dir.cwd().deleteFile(io, agent_path) catch {};
             g_status.set(io, .downloading, "updating agent from {s}", .{cfg.hub});
+            spawn_ts = null;
         }
 
-        // RESCUE: re-validate (and re-download) before every (re)start.
-        // Mark "downloading" only when the binary is actually absent/invalid so
-        // the console shows the bootstrap phase (the common cold-start case).
+        const st = agentOnlineState(io);
+        const child_pid = currentChildPid(io);
+
+        // Are we within the post-spawn connect grace window?
+        var in_grace = false;
+        if (spawn_ts) |ts| {
+            const elapsed: u64 = @intCast(@max(0, ts.durationTo(Io.Timestamp.now(io, .awake)).toMilliseconds()));
+            if (elapsed >= cfg.connect_grace_ms) {
+                spawn_ts = null;
+            } else if (child_pid > 0) {
+                in_grace = true;
+            }
+        }
+
+        // CASE A: the hub says the agent is connected (ours or a pre-existing one
+        // started independently). Stand by — do NOT spawn. This is what kills the
+        // restart-spam: a separately-running agent keeps us idle forever.
+        if (st.online and !force_update) {
+            backoff = cfg.min_backoff_ms;
+            g_status.lock(io);
+            g_status.phase = .supervising;
+            if (child_pid > 0) g_status.agent_pid = child_pid;
+            const d = std.fmt.bufPrint(&g_status.detail_buf, "agent online; standing by", .{}) catch "";
+            g_status.detail_len = d.len;
+            g_status.unlock(io);
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
+        }
+
+        // CASE B: not (yet) online, but our own agent child is alive or just
+        // spawned (still connecting). Wait — spawning another would flock-exit.
+        if (!force_update and (child_pid > 0 or in_grace)) {
+            g_status.set(io, .starting_agent, "agent started (pid {d}); awaiting hub online", .{child_pid});
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
+        }
+
+        // CASE C: the agent is offline and we have no live child of our own ->
+        // (re)launch it.
+        if (prev_decoy) |d| {
+            Io.Dir.cwd().deleteFile(io, d) catch {};
+            gpa.free(d);
+            prev_decoy = null;
+        }
+
+        // Re-validate (and re-download) before launching.
         const needs_dl = !agentLooksValid(io, agent_path);
         if (needs_dl) {
             g_status.set(io, .downloading, "fetching agent from {s}", .{cfg.hub});
@@ -1035,23 +1181,17 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         };
         if (needs_dl) traceLine(io, "agent ready ({s})", .{rescue_version});
 
-        // LOW-KEY NAME: launch the agent under a neutral helper name (a copy of
-        // the validated binary), chosen deterministically from the fingerprint
-        // (stable per host, not per launch). The agent's identity lives in
-        // --data-dir (sys0-agent.id), so the rescue<->agent binding is preserved
-        // no matter what the executable is called.
+        // Low-key process name: launch from a neutral-named copy (deterministic
+        // per host). Identity lives in --data-dir, so the name is cosmetic.
         const decoy = prepareDecoy(gpa, io, cfg.data_dir, agent_path, fingerprint);
         const spawn_path = decoy orelse agent_path;
         prev_decoy = decoy;
-
-        // The decoy file's basename is the disguised process name.
         const disguise = std.fs.path.basename(spawn_path);
         g_status.set(io, .starting_agent, "spawning agent as {s}", .{disguise});
         traceLine(io, "starting agent as {s}", .{disguise});
 
         const start_ts = Io.Timestamp.now(io, .awake);
-
-        var child = std.process.spawn(io, .{
+        const spawned = std.process.spawn(io, .{
             .argv = &.{ spawn_path, "--data-dir", cfg.data_dir },
             .stdin = .ignore,
             .stdout = .inherit,
@@ -1059,77 +1199,52 @@ fn supervise(io: Io, cfg: Config, gpa: std.mem.Allocator, agent_path: []const u8
         }) catch |err| {
             g_status.set(io, .error_state, "spawn failed: {s}", .{@errorName(err)});
             traceLine(io, "spawn failed: {s}", .{@errorName(err)});
-            // corrupt binary? force re-download
-            Io.Dir.cwd().deleteFile(io, agent_path) catch {};
+            Io.Dir.cwd().deleteFile(io, agent_path) catch {}; // corrupt? force re-download
             sleepMs(io, backoff);
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
             continue;
         };
 
-        // Agent is up. Record its pid, count the (re)start, flip to supervising.
-        const agent_pid = pidFromChild(&child);
+        // Heap-allocate the child so it outlives this stack frame: the detached
+        // reaper owns the wait() and frees it. (Single waiter = the reaper; the
+        // command watcher only kills, never waits — preserves one-owner-wait.)
+        const child_ptr = gpa.create(std.process.Child) catch |err| {
+            // Can't track it for reaping/kill; let it run unmanaged rather than
+            // fail. It still serves; we just won't be able to kill it explicitly.
+            logLine("track child failed: {s}", .{@errorName(err)});
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
+        };
+        child_ptr.* = spawned;
+        const agent_pid = pidFromChild(child_ptr);
+
+        g_child_mu.lockUncancelable(io);
+        g_child = child_ptr;
+        g_child_pid = agent_pid;
+        g_child_mu.unlock(io);
+
         g_status.lock(io);
         g_status.restarts += 1;
-        g_status.phase = .supervising;
+        g_status.phase = .starting_agent;
         g_status.agent_pid = agent_pid;
-        const detail = std.fmt.bufPrint(&g_status.detail_buf, "agent running (pid {d}, as {s})", .{ agent_pid, disguise }) catch "";
-        g_status.detail_len = detail.len;
+        const sd = std.fmt.bufPrint(&g_status.detail_buf, "agent spawned (pid {d}, as {s}); awaiting hub online", .{ agent_pid, disguise }) catch "";
+        g_status.detail_len = sd.len;
         g_status.unlock(io);
         traceLine(io, "agent up: pid {d} as {s}", .{ agent_pid, disguise });
 
         if (cfg.once) {
             logLine("--once: agent spawned, exiting supervisor", .{});
+            gpa.destroy(child_ptr); // don't reap; --once is throwaway
             return;
         }
 
-        // Expose the child so the command watcher can interrupt the wait below
-        // (manual restart/update kills it -> we relaunch).
-        setCurrentChild(io, &child);
-        const term = child.wait(io) catch |err| {
-            setCurrentChild(io, null);
-            logLine("wait failed: {s}", .{@errorName(err)});
-            sleepMs(io, backoff);
-            backoff = @min(backoff * 2, cfg.max_backoff_ms);
-            continue;
+        // Detached reaper owns the wait(); supervise never blocks on the agent.
+        _ = io.concurrent(reapAgent, .{ io, gpa, child_ptr, start_ts }) catch |err| {
+            logLine("reaper unavailable: {s}", .{@errorName(err)});
         };
-        setCurrentChild(io, null);
-
-        const now_ts = Io.Timestamp.now(io, .awake);
-        const uptime_ms: u64 = @intCast(@max(0, start_ts.durationTo(now_ts).toMilliseconds()));
-
-        var exit_code: i64 = -1;
-        switch (term) {
-            .exited => |code| {
-                exit_code = code;
-                logLine("agent exited code={d} after {d}ms", .{ code, uptime_ms });
-            },
-            .signal => |sg| {
-                exit_code = -@as(i64, @intFromEnum(sg));
-                logLine("agent killed by signal={d} after {d}ms", .{ @intFromEnum(sg), uptime_ms });
-            },
-            .stopped => |sg| logLine("agent stopped signal={d}", .{@intFromEnum(sg)}),
-            .unknown => |u| logLine("agent ended unknown={d}", .{u}),
-        }
-
-        if (uptime_ms >= cfg.healthy_uptime_ms) {
-            backoff = cfg.min_backoff_ms;
-        } else {
-            backoff = @min(backoff * 2, cfg.max_backoff_ms);
-        }
-
-        // Record the exit for the console detail view, then announce the
-        // restart backoff phase.
-        g_status.lock(io);
-        g_status.last_exit = exit_code;
-        g_status.last_uptime_ms = uptime_ms;
-        g_status.phase = .restarting;
-        g_status.agent_pid = -1;
-        const rd = std.fmt.bufPrint(&g_status.detail_buf, "agent exited ({d}) after {d}ms; restart in {d}ms", .{ exit_code, uptime_ms, backoff }) catch "";
-        g_status.detail_len = rd.len;
-        g_status.unlock(io);
-
-        traceLine(io, "agent exited code={d} after {d}ms; restart in {d}ms", .{ exit_code, uptime_ms, backoff });
-        sleepMs(io, backoff);
+        spawn_ts = start_ts;
+        backoff = cfg.min_backoff_ms;
+        sleepMs(io, cfg.check_interval_s * 1000);
     }
 }
 

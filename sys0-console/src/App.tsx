@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, rememberCreds, forgetCreds, hasRemembered, getRememberedUser, type Node, type RescueInfo, type RescueCommand } from "./api";
 import { Shell } from "./components/Shell";
 import { Tasks } from "./components/Tasks";
@@ -411,7 +412,7 @@ const CMD_STATUS: Record<string, { label: string; color: string }> = {
 function TraceModal({ nodeId, trace, onClose }: {
   nodeId: string; trace: { t: number; m: string }[]; onClose: () => void;
 }) {
-  return (
+  return createPortal((
     <div onClick={onClose} style={{
       position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)",
       display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2147483600,
@@ -436,7 +437,7 @@ function TraceModal({ nodeId, trace, onClose }: {
         </div>
       </div>
     </div>
-  );
+  ), document.body);
 }
 
 function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {

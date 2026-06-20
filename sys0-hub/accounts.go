@@ -730,10 +730,16 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 	// commands still pending so it can execute them (HTTPS long-poll style).
 	applyRescueResults(nodeID, body.Results)
 	pending := pendingRescueCommands(nodeID)
+	// Is the agent for this node currently connected to the hub? The rescue uses
+	// this to decide whether to (re)launch the agent — the two are decoupled
+	// processes that only learn each other's liveness via the hub, so a rescue
+	// no longer supervises the agent as a child (which restart-spammed whenever a
+	// separately-started agent already held the single-instance lock).
+	agentOnline := h.reg.get(nodeID) != nil
 	// nudge consoles so the rescue badge/detail updates without a poll
 	h.reg.broadcast("node", "event.node", gin.H{
 		"event": "rescue", "id": nodeID,
 		"rescueVersion": body.Version, "status": body.Status, "detail": body.Detail,
 	})
-	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID, "commands": pending})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "node": nodeID, "commands": pending, "agentOnline": agentOnline})
 }
