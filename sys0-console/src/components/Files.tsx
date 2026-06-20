@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, b64encode, b64decode } from "../api";
 import { confirmDialog, alertDialog } from "./dialogs";
 
@@ -21,8 +21,13 @@ export function Files({ node, os }: { node: string; os: string }) {
   // upload progress: null = idle; otherwise live transfer state + a small log.
   const [up, setUp] = useState<null | {
     name: string; sent: number; total: number; done: boolean; failed: boolean;
+    canceled?: boolean;
     bps: number; // bytes/sec, live
   }>(null);
+  // Set true by the 取消 button; the chunk loop checks it between chunks and
+  // aborts (the in-flight chunk finishes first, then we stop). A ref so the
+  // running async loop sees the latest value without a re-render dependency.
+  const cancelRef = useRef(false);
   const [uplog, setUplog] = useState<string[]>([]);
 
   // --- windows path helpers ---
@@ -116,6 +121,7 @@ export function Files({ node, os }: { node: string; os: string }) {
     const t0 = Date.now();
     const log = (m: string) => setUplog((l) => [...l.slice(-60), `${new Date().toLocaleTimeString()} ${m}`]);
     setUplog([]);
+    cancelRef.current = false;
     setUp({ name: file.name, sent: 0, total, done: false, failed: false, bps: 0 });
     log(`开始上传 ${file.name}（${fmtSize(total)}）→ ${dest}`);
     try {
@@ -124,6 +130,13 @@ export function Files({ node, os }: { node: string; os: string }) {
         await api.one(node, "fs.put", { path: dest, data: "", offset: 0 });
       }
       for (let off = 0; off < total; off += CHUNK) {
+        if (cancelRef.current) {
+          const sent = off;
+          setUp({ name: file.name, sent, total, done: false, failed: true, canceled: true, bps: 0 });
+          log(`已取消 ✗ 已传 ${fmtSize(sent)} / ${fmtSize(total)}（节点上为不完整文件）`);
+          ls(path);
+          return;
+        }
         const slice = buf.subarray(off, Math.min(off + CHUNK, total));
         const res: any = await api.one(node, "fs.put", { path: dest, data: b64encode(slice), offset: off });
         const sent = Math.min(off + slice.length, total);
@@ -175,11 +188,15 @@ export function Files({ node, os }: { node: string; os: string }) {
         <div className="panel p-2 flex flex-col gap-1">
           <div className="flex items-center gap-2 mono-sm">
             <span style={{ flex: 1, color: up.failed ? "var(--danger)" : up.done ? "var(--accent)" : "var(--fg)" }}>
-              {up.failed ? "上传失败" : up.done ? "上传完成" : "上传中"} · {up.name}
+              {up.canceled ? "已取消" : up.failed ? "上传失败" : up.done ? "上传完成" : "上传中"} · {up.name}
             </span>
             <span style={{ color: "var(--muted)" }}>
               {fmtSize(up.sent)} / {fmtSize(up.total)} · {up.total ? Math.floor((up.sent / up.total) * 100) : 100}%{up.bps > 0 ? ` · ${fmtSize(up.bps)}/s` : ""}
             </span>
+            {!up.done && !up.failed && (
+              <button className="btn" style={{ padding: "0 9px", color: "var(--danger)" }}
+                onClick={() => { cancelRef.current = true; }}>取消</button>
+            )}
             {(up.done || up.failed) && (
               <button className="btn" style={{ padding: "0 7px" }} onClick={() => setUp(null)}>×</button>
             )}

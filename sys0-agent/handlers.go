@@ -87,7 +87,9 @@ func (a *Agent) doProcSignal(params json.RawMessage) (any, *rpc.Error) {
 // shellCommand builds a non-interactive shell invocation for the current OS.
 func shellCommand(ctx context.Context, cmdline string) *exec.Cmd {
 	if runtime.GOOS == "windows" {
-		return exec.CommandContext(ctx, "cmd", "/c", cmdline)
+		c := exec.CommandContext(ctx, "cmd", "/c", cmdline)
+		hideWindow(c) // no black console window flash for background shell.run
+		return c
 	}
 	return exec.CommandContext(ctx, "sh", "-c", cmdline)
 }

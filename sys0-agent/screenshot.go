@@ -154,7 +154,8 @@ func capturePNGWindows(ctx context.Context, path string, _ int) ([]byte, string,
 		`$g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size);` +
 		`$bmp.Save('` + path + `',[System.Drawing.Imaging.ImageFormat]::Png);` +
 		`$g.Dispose();$bmp.Dispose()`
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps)
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps)
+	hideWindow(cmd) // suppress the black console window flash on Windows
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, "", fmt.Errorf("powershell capture: %v: %s", err, out)
 	}
