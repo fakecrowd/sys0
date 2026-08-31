@@ -5,6 +5,9 @@ from typing import TypeVar
 
 T = TypeVar("T")
 
+def should_pull_image(skip_loaded_image: str | None) -> bool:
+    return skip_loaded_image != "1"
+
 def retry(action: Callable[[], T], *, attempts: int, delay_seconds: Callable[[int], float], sleep: Callable[[float], None] = time.sleep, on_error: Callable[[int, Exception], None] | None = None) -> T:
     if attempts < 1:
         raise ValueError("attempts must be positive")
