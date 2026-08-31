@@ -23,6 +23,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
 
 # ---- stage 3: minimal runtime ----
 FROM gcr.io/distroless/static-debian12:nonroot
+LABEL org.opencontainers.image.source="https://github.com/fakecrowd/sys0"
 WORKDIR /data
 COPY --from=build /out/sys0-hub /usr/local/bin/sys0-hub
 # 8080 = console + REST/WS + MCP ; 7000 = agent TCP

@@ -1,7 +1,7 @@
 name: Deploy (prod)
 
 # GitOps deployment to jp09:
-#   1. Build and push ghcr.io/fakecrowd/sys0:{latest,version}.
+#   1. Build and push ghcr.io/fakecrowd/sys0-runtime:{latest,version}.
 #   2. Explicitly pull :latest on Portainer endpoint 4.
 #   3. Git-redeploy repository stack 48 (`sys0-jp09`) from the
 #      private deployment repository.
@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  IMAGE: ghcr.io/fakecrowd/sys0-runtime
 
 jobs:
   build-and-push:
@@ -49,6 +49,10 @@ jobs:
             ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
           cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
           cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache,mode=max
+      - name: Publish container package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method PATCH /user/packages/container/sys0-runtime -f visibility=public
 
   deploy:
     needs: build-and-push
@@ -63,7 +67,7 @@ jobs:
           DEPLOY_REPO_TOKEN: ${{ secrets.DEPLOY_REPO_TOKEN }}
           ENDPOINT: "4"
           STACK: "48"
-          IMAGE: ghcr.io/${{ github.repository }}
+          IMAGE: ghcr.io/fakecrowd/sys0-runtime
         run: |
           set -euo pipefail
           test -n "$PORTAINER_URL"
