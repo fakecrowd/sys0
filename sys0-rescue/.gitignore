@@ -1,0 +1,8 @@
+# build artifacts
+/sys0-rescue
+/sys0-rescue-*
+*.exe
+/dist/
+/zig-cache/
+/.zig-cache/
+*.o

