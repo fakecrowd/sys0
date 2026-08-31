@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python3 .github/scripts/check_identity_leaks.py
-      - run: python3 -m unittest check_identity_leaks_test.py
+      - run: python3 -m unittest discover -p '*_test.py'
         working-directory: .github/scripts
 
   # Build, vet and unit-test the Go code on all three OSes.

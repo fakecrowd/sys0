@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Reliable GitOps deployment of sys0 to jp09 via Portainer."""
 import json, os, subprocess, sys, tempfile, time, urllib.parse
+from deploy_utils import retry
 URL=os.environ.get('PORTAINER_URL','').rstrip('/')
 HOST=urllib.parse.urlparse(URL).hostname or ''
 ORIGIN=os.environ.get('PORTAINER_ORIGIN_IP','')
@@ -33,9 +34,12 @@ try:
  if not cur or cur.get('State')!='running':raise RuntimeError('sys0 missing or not running after redeploy')
  if cur.get('ImageID')!=latest:raise RuntimeError(f'running ImageID {cur.get("ImageID")} != latest {latest}')
  print('sys0 running',cur.get('Status'),'ImageID',latest[:24])
- public=subprocess.check_output(['curl','-fsS','--max-time','30','https://sys0.facrd.xyz/api/v1/setup/status'])
- status=json.loads(public)
- if status.get('needsSetup') is not False:raise RuntimeError('public setup status is not initialized')
+ def public_status():
+  payload=subprocess.check_output(['curl','-fsS','--max-time','20','https://sys0.facrd.xyz/api/v1/setup/status'])
+  status=json.loads(payload)
+  if status.get('needsSetup') is not False:raise RuntimeError('public setup status is not initialized')
+  return status
+ retry(public_status,attempts=6,delay_seconds=lambda attempt: attempt*5,on_error=lambda attempt,error: print(f'public verification attempt {attempt} failed: {error}'))
  print('public verification OK');print('deploy OK')
 finally:
  try:os.unlink(cfg)
