@@ -572,14 +572,15 @@ func assetFor(payload []byte, kind, wantOS, wantArch, wantModule string) (url, n
 // console can show a live status view (downloading, supervising, restarting…).
 type rescueInfo struct {
 	version      string
-	status       string // phase: starting|downloading|starting-agent|supervising|restarting|error
-	detail       string // free-text detail (last log-worthy event)
-	restarts     int    // how many times the rescue has (re)started the agent
-	lastExit     int    // last agent exit code (-1 = none yet)
-	lastUptimeMs int64  // how long the agent ran last time
-	cwd          string // rescue work dir (download/stage/decoy location)
-	agentPid     int    // pid of the agent the rescue currently supervises (-1 = none)
-	trace        []traceEvent // recent rescue activity (agent startup sequence, etc.)
+	status       string         // phase: starting|downloading|starting-agent|supervising|restarting|error
+	detail       string         // free-text detail (last log-worthy event)
+	restarts     int            // how many times the rescue has (re)started the agent
+	lastExit     int            // last agent exit code (-1 = none yet)
+	lastUptimeMs int64          // how long the agent ran last time
+	cwd          string         // rescue work dir (download/stage/decoy location)
+	agentPid     int            // pid of the agent the rescue currently supervises (-1 = none)
+	trace        []traceEvent   // recent rescue activity (agent startup sequence, etc.)
+	progress     rescueProgress // current/last agent deployment byte progress
 	firstSeen    time.Time
 	lastSeen     time.Time
 }
@@ -646,6 +647,7 @@ type rescueView struct {
 	Cwd          string          `json:"cwd,omitempty"`      // rescue work dir
 	AgentPid     int             `json:"agentPid,omitempty"` // supervised agent pid
 	Trace        []traceEvent    `json:"trace,omitempty"`    // recent rescue activity (startup sequence)
+	Progress     rescueProgress  `json:"progress"`           // agent deployment bytes/modules/percent
 	Commands     []rescueCommand `json:"commands,omitempty"` // recent operator commands + their status
 }
 
@@ -672,6 +674,7 @@ func rescueStatus(nodeID string) rescueView {
 		Cwd:          info.cwd,
 		AgentPid:     info.agentPid,
 		Trace:        info.trace,
+		Progress:     info.progress,
 		SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
 		AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
 		Commands:     rescueCommandHistory(nodeID),
@@ -704,6 +707,7 @@ func liveRescueNodes() map[string]rescueView {
 			Cwd:          info.cwd,
 			AgentPid:     info.agentPid,
 			Trace:        info.trace,
+			Progress:     info.progress,
 			SinceSec:     int64(time.Since(info.firstSeen).Seconds()),
 			AgeSec:       int64(time.Since(info.lastSeen).Seconds()),
 			Commands:     rescueCommandHistory(id),
@@ -720,19 +724,20 @@ func liveRescueNodes() map[string]rescueView {
 // continuously through every phase, so this can arrive with no live agent yet.
 func (h *Hub) apiRescueReport(c *gin.Context) {
 	var body struct {
-		Key          string `json:"key"`
-		Fingerprint  string `json:"fingerprint"`
-		Version      string `json:"version"`
-		OS           string `json:"os"`
-		Arch         string `json:"arch"`
-		Status       string `json:"status"`
-		Detail       string `json:"detail"`
-		Cwd          string `json:"cwd"`
-		AgentPid     int    `json:"agentPid"`
-		Restarts     int    `json:"restarts"`
-		LastExit     int    `json:"lastExit"`
-		LastUptimeMs int64  `json:"lastUptimeMs"`
-		Trace        []traceEvent `json:"trace"`
+		Key          string         `json:"key"`
+		Fingerprint  string         `json:"fingerprint"`
+		Version      string         `json:"version"`
+		OS           string         `json:"os"`
+		Arch         string         `json:"arch"`
+		Status       string         `json:"status"`
+		Detail       string         `json:"detail"`
+		Cwd          string         `json:"cwd"`
+		AgentPid     int            `json:"agentPid"`
+		Restarts     int            `json:"restarts"`
+		LastExit     int            `json:"lastExit"`
+		LastUptimeMs int64          `json:"lastUptimeMs"`
+		Trace        []traceEvent   `json:"trace"`
+		Progress     rescueProgress `json:"progress"`
 		Results      []struct {
 			ID     string `json:"id"`
 			Status string `json:"status"`
@@ -772,6 +777,7 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 	if body.AgentPid == 0 {
 		body.AgentPid = -1 // rescue sends -1 for "no agent"; normalize a missing field too
 	}
+	body.Progress = normalizeRescueProgress(body.Progress)
 	nodeID := "n" + body.Fingerprint[:6]
 	now := time.Now()
 	rescueMu.Lock()
@@ -797,6 +803,7 @@ func (h *Hub) apiRescueReport(c *gin.Context) {
 		cwd:          body.Cwd,
 		agentPid:     body.AgentPid,
 		trace:        body.Trace,
+		progress:     body.Progress,
 		firstSeen:    first,
 		lastSeen:     now,
 	}

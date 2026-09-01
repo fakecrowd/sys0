@@ -17,6 +17,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const root = @import("main.zig");
+const policy = @import("install_policy.zig");
 
 const Io = std.Io;
 const Map = std.process.Environ.Map;
@@ -33,11 +34,10 @@ fn isPrivileged() bool {
     };
 }
 
+extern "shell32" fn IsUserAnAdmin() callconv(.winapi) std.os.windows.BOOL;
 fn isWindowsAdmin() bool {
     if (builtin.os.tag != .windows) return false;
-    // Best-effort: try to open the SCM with create rights; success => admin.
-    // Falls back to false on any error (treated as unprivileged -> user install).
-    return false; // conservative default; Windows install uses per-user path
+    return IsUserAnAdmin().toBool();
 }
 
 // Copy this running executable to a stable path inside data_dir so the autostart
@@ -116,7 +116,7 @@ pub fn installAutostart(gpa: std.mem.Allocator, io: Io, env: *Map, cfg: root.Con
     switch (builtin.os.tag) {
         .linux => try installLinux(gpa, io, env, cfg, self_path, priv),
         .macos => try installMac(gpa, io, env, cfg, self_path, priv),
-        .windows => try installWindows(gpa, io, env, cfg, self_path),
+        .windows => try installWindows(gpa, io, env, cfg, self_path, priv),
         else => return error.UnsupportedPlatform,
     }
     logLine("autostart installed. rescue (and the agent it supervises) will start automatically.", .{});
@@ -251,24 +251,58 @@ fn uninstallMac(gpa: std.mem.Allocator, io: Io, env: *Map, priv: bool) !void {
     Io.Dir.cwd().deleteFile(io, path) catch {};
 }
 
-// ---- Windows: per-user registry Run value --------------------------------
-fn installWindows(gpa: std.mem.Allocator, io: Io, env: *Map, cfg: root.Config, self_path: []const u8) !void {
+// ---- Windows: redundant boot/login entries with process-level de-dup ------
+fn installWindows(gpa: std.mem.Allocator, io: Io, env: *Map, cfg: root.Config, self_path: []const u8, priv: bool) !void {
     _ = env;
-    // Per-user autostart, no admin required: HKCU Run value launching rescue.
-    // (The standalone agent is already a GUI-subsystem binary, and rescue is a
-    // console binary; a future --silent could hide its window if desired.)
-    const cmd = try std.fmt.allocPrint(gpa, "\"{s}\" --hub {s} --data-dir \"{s}\"", .{ self_path, cfg.hub, cfg.data_dir });
-    _ = run(io, &.{
-        "reg", "add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        "/v",  service_name, "/t", "REG_SZ", "/d", cmd, "/f",
-    });
-    logLine("HKCU Run value set: {s}", .{service_name});
+    // Every OS-launched copy opts out of re-installation. Multiple configured
+    // entries are intentional redundancy; main's Global named mutex guarantees
+    // only one supervisor for this data-dir remains alive.
+    const cmd = try std.fmt.allocPrint(gpa,
+        "\"{s}\" --hub {s} --data-dir \"{s}\" --modules \"{s}\" --no-install",
+        .{ self_path, cfg.hub, cfg.data_dir, cfg.modules },
+    );
+    const targets = policy.windowsTargets(priv);
+    var installed: usize = 0;
+
+    if (targets.system_startup_task) {
+        if (run(io, &.{ "schtasks", "/Create", "/TN", service_name, "/SC", "ONSTART", "/RU", "SYSTEM", "/RL", "HIGHEST", "/TR", cmd, "/F" })) {
+            installed += 1;
+            logLine("SYSTEM startup task set: {s}", .{service_name});
+        } else logLine("SYSTEM startup task failed: {s}", .{service_name});
+    }
+    if (targets.hklm_run) {
+        if (run(io, &.{
+            "reg", "add", "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "/v", service_name, "/t", "REG_SZ", "/d", cmd, "/f",
+        })) {
+            installed += 1;
+            logLine("HKLM Run value set: {s}", .{service_name});
+        } else logLine("HKLM Run value failed: {s}", .{service_name});
+    }
+    if (targets.hkcu_run) {
+        if (run(io, &.{
+            "reg", "add", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            "/v", service_name, "/t", "REG_SZ", "/d", cmd, "/f",
+        })) {
+            installed += 1;
+            logLine("HKCU Run value set: {s}", .{service_name});
+        } else logLine("HKCU Run value failed: {s}", .{service_name});
+    }
+    if (installed == 0) return error.AutostartInstallFailed;
+    logLine("Windows autostart entries installed: {d}", .{installed});
 }
 
 fn uninstallWindows(gpa: std.mem.Allocator, io: Io) !void {
     _ = gpa;
+    // Try every possible entry. Unprivileged callers may fail to remove system
+    // entries but can still remove HKCU; explicit failures are visible in logs.
+    _ = run(io, &.{ "schtasks", "/Delete", "/TN", service_name, "/F" });
     _ = run(io, &.{
-        "reg",          "delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
-        "/v",           service_name, "/f",
+        "reg", "delete", "HKLM\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "/v", service_name, "/f",
+    });
+    _ = run(io, &.{
+        "reg", "delete", "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "/v", service_name, "/f",
     });
 }

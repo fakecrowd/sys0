@@ -15,6 +15,7 @@ import { CacheModal } from "./components/CacheModal";
 import { Setup } from "./components/Setup";
 import { Download } from "./components/Download";
 import { DOWNLOAD_PATH } from "./downloadNav";
+import { progressSummary } from "./rescueProgress";
 import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
 import { WindowManager, type WinApp } from "./WindowManager";
 
@@ -498,6 +499,7 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
   const cmds: RescueCommand[] = (r?.commands || []).slice().reverse();
   // Full trace, chronological (oldest -> newest). Shown in a modal on demand.
   const trace = r?.trace || [];
+  const progress = r?.progress;
   const [traceOpen, setTraceOpen] = useState(false);
 
   return (
@@ -512,6 +514,25 @@ function RescueDetail({ nodeId, r, fallbackVer, onChanged }: {
           <span style={{ wordBreak: "break-all" }}>{v}</span>
         </div>
       ))}
+
+      {progress && progress.modules > 0 && (
+        <div className="mt-2" style={{ borderTop: "1px solid var(--border)", paddingTop: 7 }}>
+          <div className="flex items-center gap-2" style={{ marginBottom: 5 }}>
+            <span style={{ color: progress.active ? "var(--warn)" : "var(--accent)" }}>
+              agent 部署 · {progress.active ? "进行中" : "已完成"}
+            </span>
+            <span style={{ marginLeft: "auto", color: "var(--muted)" }}>{progressSummary(progress)}</span>
+          </div>
+          {progress.total > 0 && (
+            <div style={{ height: 6, borderRadius: 999, overflow: "hidden", background: "var(--border)" }}>
+              <div style={{
+                height: "100%", width: `${Math.max(0, Math.min(100, progress.percent))}%`,
+                background: progress.active ? "var(--warn)" : "var(--accent)", transition: "width .25s ease",
+              }} />
+            </div>
+          )}
+        </div>
+      )}
 
       {trace.length > 0 && (
         <div className="mt-2" style={{ borderTop: "1px solid var(--border)", paddingTop: 6 }} onClick={(e) => e.stopPropagation()}>

@@ -1,5 +1,7 @@
 // REST client for the sys0-hub API.
 
+import type { RescueProgress } from "./rescueProgress";
+
 export type RescueCommand = {
   id: string;
   kind: string; // update-agent | restart-agent
@@ -25,6 +27,7 @@ export type RescueInfo = {
   cwd?: string; // rescue work dir (download/stage/decoy location)
   agentPid?: number; // pid of the supervised agent (-1 = none)
   trace?: TraceEvent[]; // recent rescue activity (agent startup sequence)
+  progress: RescueProgress; // current/last agent deployment progress
   sinceSec: number; // continuous-reporting uptime
   ageSec: number; // seconds since last report
   commands?: RescueCommand[]; // recent operator commands + their status

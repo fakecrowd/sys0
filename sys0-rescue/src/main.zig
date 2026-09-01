@@ -26,6 +26,8 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const install = @import("install.zig");
+const install_policy = @import("install_policy.zig");
+const progress_policy = @import("progress_policy.zig");
 
 const Io = std.Io;
 
@@ -93,6 +95,36 @@ pub const Config = struct {
 
 const Action = enum { run, install, uninstall, help };
 
+// Redundant Windows autostart entries can fire in different login sessions at
+// nearly the same time. A Global named mutex, scoped by data-dir hash, makes the
+// rescue process itself the final de-duplication boundary.
+extern "kernel32" fn CreateMutexW(?*anyopaque, std.os.windows.BOOL, [*:0]const u16) callconv(.winapi) ?*anyopaque;
+extern "kernel32" fn GetLastError() callconv(.winapi) u32;
+extern "kernel32" fn CloseHandle(*anyopaque) callconv(.winapi) std.os.windows.BOOL;
+var g_windows_singleton: ?*anyopaque = null;
+
+fn acquireSingleInstance(data_dir: []const u8) bool {
+    if (builtin.os.tag != .windows) return true;
+    const name = install_policy.singletonName(data_dir);
+    var wide: [name.len + 1]u16 = undefined;
+    for (name, 0..) |c, i| wide[i] = c;
+    wide[name.len] = 0;
+    const handle = CreateMutexW(null, .FALSE, @ptrCast(&wide)) orelse {
+        const code = GetLastError();
+        // Access denied normally means a SYSTEM-owned mutex already exists and
+        // this user-session fallback must exit as a duplicate.
+        if (code == 5) return false;
+        logLine("single-instance mutex unavailable (winerr {d}); continuing", .{code});
+        return true;
+    };
+    if (GetLastError() == 183) { // ERROR_ALREADY_EXISTS
+        _ = CloseHandle(handle);
+        return false;
+    }
+    g_windows_singleton = handle; // kept open for process lifetime
+    return true;
+}
+
 // ---- shared rescue status (reported to the hub) ---------------------------
 // The supervise loop writes Status; the reporter thread reads it. Single
 // writer + single reader, but we guard with a tiny mutex for safety on the
@@ -154,6 +186,79 @@ const Status = struct {
 
 // Global status the reporter thread reads. Lives for the process lifetime.
 var g_status: Status = .{};
+
+// Concurrent module downloads contribute to one deployment progress snapshot.
+// Slots 0..3 map to core/shell/fs/screen and slot 4 is the monolith (all).
+const progress_slot_count = module_names.len + 1;
+const ProgressRuntimeSnapshot = struct {
+    value: progress_policy.Snapshot,
+    module_buf: [32]u8 = undefined,
+    module_len: usize = 0,
+    fn module(self: *const ProgressRuntimeSnapshot) []const u8 {
+        return self.module_buf[0..self.module_len];
+    }
+};
+const DownloadProgress = struct {
+    mu: Io.Mutex = .init,
+    items: [progress_slot_count]progress_policy.Item = [_]progress_policy.Item{.{}} ** progress_slot_count,
+    dirty: bool = false,
+
+    fn slot(module: []const u8) usize {
+        return moduleIndex(module) orelse module_names.len;
+    }
+    fn begin(self: *DownloadProgress, io: Io, module: []const u8) usize {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
+        const current = progress_policy.summarize(&self.items);
+        if (!current.active) self.items = [_]progress_policy.Item{.{}} ** progress_slot_count;
+        const idx = slot(module);
+        self.items[idx] = .{ .planned = true, .active = true };
+        self.dirty = true;
+        return idx;
+    }
+    fn setTotal(self: *DownloadProgress, io: Io, idx: usize, total: u64) void {
+        self.mu.lockUncancelable(io);
+        self.items[idx].total = total;
+        self.dirty = true;
+        self.mu.unlock(io);
+    }
+    fn add(self: *DownloadProgress, io: Io, idx: usize, n: u64) void {
+        self.mu.lockUncancelable(io);
+        self.items[idx].downloaded +|= n;
+        self.dirty = true;
+        self.mu.unlock(io);
+    }
+    fn finish(self: *DownloadProgress, io: Io, idx: usize, success: bool) void {
+        self.mu.lockUncancelable(io);
+        self.items[idx].active = false;
+        self.items[idx].completed = success;
+        self.dirty = true;
+        self.mu.unlock(io);
+    }
+    fn snapshot(self: *DownloadProgress, io: Io) ProgressRuntimeSnapshot {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
+        var out = ProgressRuntimeSnapshot{ .value = progress_policy.summarize(&self.items) };
+        const label: []const u8 = if (out.value.modules > 1) "multiple" else blk: {
+            for (self.items, 0..) |item, i| {
+                if (!item.planned) continue;
+                break :blk if (i < module_names.len) module_names[i] else "all";
+            }
+            break :blk "";
+        };
+        @memcpy(out.module_buf[0..label.len], label);
+        out.module_len = label.len;
+        return out;
+    }
+    fn takeDirty(self: *DownloadProgress, io: Io) bool {
+        self.mu.lockUncancelable(io);
+        defer self.mu.unlock(io);
+        const was = self.dirty;
+        self.dirty = false;
+        return was;
+    }
+};
+var g_progress: DownloadProgress = .{};
 
 // ---- trace ring (rescue activity log, surfaced in the console) ------------
 // A small fixed ring of timestamped one-line events describing what the rescue
@@ -454,6 +559,37 @@ fn agentLooksValid(io: Io, path: []const u8) bool {
     return st.size > 512 * 1024;
 }
 
+// Stream one HTTP response into a file writer while publishing byte progress.
+// Using the lower-level Request API (instead of Client.fetch) exposes the final
+// response Content-Length after redirects, so percentage is real, not guessed.
+fn fetchAgentBody(gpa: std.mem.Allocator, io: Io, url: []const u8, writer: *std.Io.Writer, progress_idx: usize) !void {
+    var client: std.http.Client = .{ .allocator = gpa, .io = io };
+    defer client.deinit();
+    const uri = try std.Uri.parse(url);
+    var req = try client.request(.GET, uri, .{
+        .redirect_behavior = @enumFromInt(10),
+        .headers = .{ .accept_encoding = .{ .override = "identity" } },
+    });
+    defer req.deinit();
+    try req.sendBodiless();
+    var redirect_buf: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buf);
+    if (response.head.status != .ok) {
+        logLine("hub returned HTTP {d}", .{@intFromEnum(response.head.status)});
+        return error.BadHttpStatus;
+    }
+    g_progress.setTotal(io, progress_idx, response.head.content_length orelse 0);
+    var transfer_buf: [64]u8 = undefined;
+    const reader = response.reader(&transfer_buf);
+    var chunk: [64 * 1024]u8 = undefined;
+    while (true) {
+        const n = try reader.readSliceShort(&chunk);
+        if (n == 0) break;
+        try writer.writeAll(chunk[0..n]);
+        g_progress.add(io, progress_idx, @intCast(n));
+    }
+}
+
 // ---- download the latest matching agent from the hub ----------------------
 fn downloadAgent(gpa: std.mem.Allocator, io: Io, cfg: Config, dest_path: []const u8) !void {
     var url_buf: [256]u8 = undefined;
@@ -471,28 +607,18 @@ fn downloadAgent(gpa: std.mem.Allocator, io: Io, cfg: Config, dest_path: []const
     var write_buf: [64 * 1024]u8 = undefined;
     var fw = out_file.writer(io, &write_buf);
 
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
-    defer client.deinit();
-
-    const res = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .response_writer = &fw.interface,
-        .redirect_behavior = @enumFromInt(10), // follow hub 302 + CDN hops
-    }) catch |err| {
+    const progress_idx = g_progress.begin(io, "all");
+    var download_ok = false;
+    defer g_progress.finish(io, progress_idx, download_ok);
+    fetchAgentBody(gpa, io, url, &fw.interface, progress_idx) catch |err| {
         logLine("fetch error: {s}", .{@errorName(err)});
+        cwd.deleteFile(io, tmp_path) catch {};
         return err;
     };
 
     try fw.interface.flush();
     out_file.close(io);
     file_closed = true;
-
-    if (res.status != .ok) {
-        logLine("hub returned HTTP {d}", .{@intFromEnum(res.status)});
-        cwd.deleteFile(io, tmp_path) catch {};
-        return error.BadHttpStatus;
-    }
 
     if (builtin.os.tag != .windows) {
         const f = try cwd.openFile(io, tmp_path, .{ .mode = .read_only });
@@ -508,6 +634,7 @@ fn downloadAgent(gpa: std.mem.Allocator, io: Io, cfg: Config, dest_path: []const
         logLine("downloaded agent failed validity check", .{});
         return error.DownloadInvalid;
     }
+    download_ok = true;
     logLine("agent installed: {s}", .{dest_path});
 }
 
@@ -673,6 +800,19 @@ fn reportLoop(io: Io, gpa: std.mem.Allocator, cfg: Config, fingerprint: []const 
     }
 }
 
+// Deployment progress changes can happen much faster than the normal 30-second
+// heartbeat. Poll the dirty bit every 2 seconds and report only when bytes or
+// lifecycle changed, so the console is live without creating idle traffic.
+fn progressReportLoop(io: Io, gpa: std.mem.Allocator, cfg: Config, fingerprint: []const u8) void {
+    while (true) {
+        sleepMs(io, 2_000);
+        if (!g_progress.takeDirty(io)) continue;
+        postReport(gpa, io, cfg, fingerprint) catch |err| {
+            logLine("progress report failed: {s}", .{@errorName(err)});
+        };
+    }
+}
+
 fn readAgentFingerprint(io: Io, gpa: std.mem.Allocator, path: []const u8) ![]u8 {
     const f = try Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer f.close(io);
@@ -760,10 +900,11 @@ fn postReport(gpa: std.mem.Allocator, io: Io, cfg: Config, fingerprint: []const 
     var results_buf: [1024]u8 = undefined;
     const results_json = buildResultsJson(&results_buf, results[0..rn]);
 
-    var body_buf: [10240]u8 = undefined;
+    const progress = g_progress.snapshot(io);
+    var body_buf: [11264]u8 = undefined;
     const body = try std.fmt.bufPrint(&body_buf,
-        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","cwd":"{s}","agentPid":{d},"restarts":{d},"lastExit":{d},"lastUptimeMs":{d},"trace":{s},"results":{s}}}
-    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, cwd_esc, agent_pid, restarts, last_exit, last_uptime_ms, trace_json, results_json });
+        \\{{"key":"{s}","fingerprint":"{s}","version":"{s}","os":"{s}","arch":"{s}","status":"{s}","detail":"{s}","cwd":"{s}","agentPid":{d},"restarts":{d},"lastExit":{d},"lastUptimeMs":{d},"progress":{{"active":{s},"module":"{s}","downloaded":{d},"total":{d},"percent":{d},"completed":{d},"modules":{d}}},"trace":{s},"results":{s}}}
+    , .{ cfg.key, fingerprint, rescue_version, os_name, arch_name, phase.label(), detail, cwd_esc, agent_pid, restarts, last_exit, last_uptime_ms, if (progress.value.active) "true" else "false", progress.module(), progress.value.downloaded, progress.value.total, progress.value.percent, progress.value.completed, progress.value.modules, trace_json, results_json });
 
     var client: std.http.Client = .{ .allocator = gpa, .io = io };
     defer client.deinit();
@@ -1262,26 +1403,17 @@ fn downloadModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, 
 
     var write_buf: [64 * 1024]u8 = undefined;
     var fw = out_file.writer(io, &write_buf);
-    var client: std.http.Client = .{ .allocator = gpa, .io = io };
-    defer client.deinit();
-    const res = client.fetch(.{
-        .location = .{ .url = url },
-        .method = .GET,
-        .response_writer = &fw.interface,
-        .redirect_behavior = @enumFromInt(10),
-    }) catch |err| {
+    const progress_idx = g_progress.begin(io, mod);
+    var download_ok = false;
+    defer g_progress.finish(io, progress_idx, download_ok);
+    fetchAgentBody(gpa, io, url, &fw.interface, progress_idx) catch |err| {
         logLine("module {s} fetch error: {s}", .{ mod, @errorName(err) });
+        cwd.deleteFile(io, tmp_path) catch {};
         return err;
     };
     try fw.interface.flush();
     out_file.close(io);
     file_closed = true;
-
-    if (res.status != .ok) {
-        logLine("hub returned HTTP {d} for module {s}", .{ @intFromEnum(res.status), mod });
-        cwd.deleteFile(io, tmp_path) catch {};
-        return error.BadHttpStatus;
-    }
     if (builtin.os.tag != .windows) {
         const f = try cwd.openFile(io, tmp_path, .{ .mode = .read_only });
         defer f.close(io);
@@ -1292,6 +1424,7 @@ fn downloadModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, 
         logLine("module {s} failed validity check", .{mod});
         return error.DownloadInvalid;
     }
+    download_ok = true;
     logLine("module {s} installed: {s}", .{ mod, dest_path });
 }
 
@@ -1818,6 +1951,11 @@ pub fn main(init: std.process.Init) !void {
     // supervisor always runs from one stable location.
     if (!cfg.once and relocateToDataDir(gpa, io, cfg)) return;
 
+    if (!cfg.once and !acquireSingleInstance(cfg.data_dir)) {
+        logLine("another rescue instance already owns this data-dir; exiting", .{});
+        return;
+    }
+
     var agent_path_buf: [std.fs.max_path_bytes]u8 = undefined;
     const agent_path = try std.fmt.bufPrint(&agent_path_buf, "{s}{c}{s}", .{ cfg.data_dir, sep, agent_filename });
 
@@ -1860,6 +1998,9 @@ pub fn main(init: std.process.Init) !void {
     if (!cfg.once and fingerprint.len >= 6) {
         _ = io.concurrent(reportLoop, .{ io, gpa, cfg, fingerprint }) catch |err| {
             logLine("hub reporter unavailable: {s}", .{@errorName(err)});
+        };
+        _ = io.concurrent(progressReportLoop, .{ io, gpa, cfg, fingerprint }) catch |err| {
+            logLine("progress reporter unavailable: {s}", .{@errorName(err)});
         };
         // Command watcher: executes operator commands (update/restart agent)
         // delivered via the report responses. Detached, best-effort.
