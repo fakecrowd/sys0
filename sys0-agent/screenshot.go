@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fakecrowd/sys0/internal/rpc"
@@ -148,14 +149,37 @@ func capturePNG(display int) ([]byte, string, error) {
 
 // capturePNGWindows uses PowerShell + System.Drawing to grab the full virtual
 // screen. No external install needed on any modern Windows.
-func capturePNGWindows(ctx context.Context, path string, _ int) ([]byte, string, error) {
-	ps := `Add-Type -AssemblyName System.Windows.Forms,System.Drawing;` +
+func windowsScreenshotPowerShell(path string) string {
+	// PowerShell/.NET is DPI-unaware by default. On a 2560x1600 display at
+	// 150% scaling, VirtualScreen otherwise reports 1707x1067 logical units
+	// while CopyFromScreen consumes physical pixels, cropping the right/bottom.
+	// Set the capture thread to Per-Monitor-V2 before querying any bounds. The
+	// process-level and legacy calls keep older Windows releases working.
+	dpiType := `using System; using System.Runtime.InteropServices;
+public static class Sys0Dpi {
+  [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
+  [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+  [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
+  public static void Enable() {
+    try { SetThreadDpiAwarenessContext(new IntPtr(-4)); return; } catch (EntryPointNotFoundException) {}
+    try { if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return; } catch (EntryPointNotFoundException) {}
+    SetProcessDPIAware();
+  }
+}`
+	safePath := strings.ReplaceAll(path, "'", "''")
+	return `Add-Type -TypeDefinition @'` + "\n" + dpiType + "\n'@;" +
+		`[Sys0Dpi]::Enable();` +
+		`Add-Type -AssemblyName System.Windows.Forms,System.Drawing;` +
 		`$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;` +
 		`$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);` +
 		`$g=[System.Drawing.Graphics]::FromImage($bmp);` +
 		`$g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size);` +
-		`$bmp.Save('` + path + `',[System.Drawing.Imaging.ImageFormat]::Png);` +
+		`$bmp.Save('` + safePath + `',[System.Drawing.Imaging.ImageFormat]::Png);` +
 		`$g.Dispose();$bmp.Dispose()`
+}
+
+func capturePNGWindows(ctx context.Context, path string, _ int) ([]byte, string, error) {
+	ps := windowsScreenshotPowerShell(path)
 	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps)
 	hideWindow(cmd) // suppress the black console window flash on Windows
 	if out, err := cmd.CombinedOutput(); err != nil {
