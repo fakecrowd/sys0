@@ -73,7 +73,7 @@ GOT=$(curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
 [ "$GOT" = "roundtrip-ok" ] || fail "fs round-trip = $GOT"
 
 echo "== API key: dangerous method gating =="
-KEYJSON=$(curl -s -H "$AUTH" -X POST "$B/api/v1/keys" -d '{"name":"e2e-bot","role":"operator","allowDangerous":false}')
+KEYJSON=$(curl -s -H "$AUTH" -X POST "$B/api/v1/me/keys" -d '{"name":"e2e-bot","methodScope":["host.metrics"]}')
 SK=$(echo "$KEYJSON" | jq_py 'd["key"]')
 BLOCKED=$(curl -s -H "Authorization: Bearer $SK" -X POST "$B/api/v1/dispatch" \
   -d '{"select":{"all":true},"call":{"method":"shell.run","params":{"cmd":"id"}}}' | jq_py 'd.get("code")')
@@ -85,7 +85,7 @@ SAFE=$(curl -s -H "Authorization: Bearer $SK" -X POST "$B/api/v1/dispatch" \
 echo "== MCP tools/list + tools/call =="
 TOOLS=$(curl -s -H "Authorization: Bearer $SK" -X POST "$B/mcp" \
   -d '{"jsonrpc":"2.0","id":"1","method":"tools/list"}' | jq_py 'len(d["result"]["tools"])')
-[ "$TOOLS" -ge 14 ] || fail "mcp tools = $TOOLS"
+[ "$TOOLS" = "2" ] || fail "scoped mcp tools = $TOOLS (expected list_nodes + host.metrics)"
 MCPNODES=$(curl -s -H "Authorization: Bearer $SK" -X POST "$B/mcp" \
   -d '{"jsonrpc":"2.0","id":"2","method":"tools/call","params":{"name":"sys0_list_nodes","arguments":{}}}' \
   | python3 -c 'import sys,json;print(len(json.loads(json.load(sys.stdin)["result"]["content"][0]["text"])))')
