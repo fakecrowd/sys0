@@ -39,7 +39,7 @@ func (h *Hub) mcpHandler(w http.ResponseWriter, r *http.Request) {
 	case "notifications/initialized":
 		w.WriteHeader(http.StatusAccepted)
 	case "tools/list":
-		writeJSON(w, http.StatusOK, jrpcOK(req.ID, map[string]any{"tools": h.mcpTools()}))
+		writeJSON(w, http.StatusOK, jrpcOK(req.ID, map[string]any{"tools": h.mcpTools(actor)}))
 	case "tools/call":
 		h.mcpToolsCall(w, req, actor)
 	case "resources/list":
@@ -48,19 +48,22 @@ func (h *Hub) mcpHandler(w http.ResponseWriter, r *http.Request) {
 			map[string]any{"uri": "sys0://audit", "name": "audit log", "mimeType": "application/json"},
 		}}))
 	case "resources/read":
-		h.mcpResourcesRead(w, req)
+		h.mcpResourcesRead(w, req, actor)
 	default:
 		writeJSON(w, http.StatusOK, jrpcErr(req.ID, rpc.CodeNoMethod, "unknown method"))
 	}
 }
 
-func (h *Hub) mcpTools() []map[string]any {
+func (h *Hub) mcpTools(actor Actor) []map[string]any {
 	tools := []map[string]any{{
 		"name":        "sys0_list_nodes",
 		"description": "列出当前在线的被控端节点。",
 		"inputSchema": map[string]any{"type": "object", "properties": map[string]any{}},
 	}}
 	for _, m := range wire.NodeMethods {
+		if !actor.methodAllowed(m.Name) || (m.Dangerous && !actor.AllowDangerous) {
+			continue
+		}
 		props := map[string]any{
 			"nodes": map[string]any{"type": "array", "items": map[string]any{"type": "string"},
 				"description": "目标节点 id 列表；留空表示全部在线节点"},
@@ -87,7 +90,7 @@ func (h *Hub) mcpToolsCall(w http.ResponseWriter, req rpc.Message, actor Actor) 
 	json.Unmarshal(req.Params, &p)
 
 	if p.Name == "sys0_list_nodes" {
-		writeJSON(w, http.StatusOK, jrpcOK(req.ID, mcpText(h.ListNodes())))
+		writeJSON(w, http.StatusOK, jrpcOK(req.ID, mcpText(h.ListNodesFor(actor))))
 		return
 	}
 
@@ -122,7 +125,7 @@ func (h *Hub) mcpToolsCall(w http.ResponseWriter, req rpc.Message, actor Actor) 
 	writeJSON(w, http.StatusOK, jrpcOK(req.ID, mcpText(res)))
 }
 
-func (h *Hub) mcpResourcesRead(w http.ResponseWriter, req rpc.Message) {
+func (h *Hub) mcpResourcesRead(w http.ResponseWriter, req rpc.Message, actor Actor) {
 	var p struct {
 		URI string `json:"uri"`
 	}
@@ -130,7 +133,7 @@ func (h *Hub) mcpResourcesRead(w http.ResponseWriter, req rpc.Message) {
 	var payload any
 	switch p.URI {
 	case "sys0://nodes":
-		payload = h.ListNodes()
+		payload = h.ListNodesFor(actor)
 	case "sys0://audit":
 		payload, _ = h.store.ListAudit(50)
 	default:

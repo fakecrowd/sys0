@@ -32,7 +32,10 @@ func TestUserAuth(t *testing.T) {
 
 func TestAPIKeyScopes(t *testing.T) {
 	s := newTestStore(t)
-	secret, rec, err := s.CreateKey("bot", "operator", []string{"n1"}, []string{"host.info"}, false, 0)
+	if _, err := s.CreateUser("owner", "secret1", "member", []string{"n1"}); err != nil {
+		t.Fatal(err)
+	}
+	secret, rec, err := s.CreateAccountKey("owner", "bot", []string{"host.info"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +43,7 @@ func TestAPIKeyScopes(t *testing.T) {
 	if !ok {
 		t.Fatal("auth key failed")
 	}
-	if got.ID != rec.ID || got.NodeScope != "n1" || got.MethodScope != "host.info" || got.AllowDangerous {
+	if got.ID != rec.ID || got.Owner != "owner" || got.MethodScope != "host.info" {
 		t.Fatalf("unexpected key record: %+v", got)
 	}
 	if _, ok := s.AuthKey("sk_bogus"); ok {

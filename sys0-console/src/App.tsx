@@ -9,7 +9,6 @@ import { Monitor } from "./components/Monitor";
 import { Screenshot } from "./components/Screenshot";
 import { Actions } from "./components/Actions";
 import { Audit } from "./components/Audit";
-import { Keys } from "./components/Keys";
 import { AccountModal } from "./components/AccountModal";
 import { CacheModal } from "./components/CacheModal";
 import { Setup } from "./components/Setup";
@@ -149,9 +148,6 @@ function Console({ onLogout }: { onLogout: () => void }) {
     { key: "screenshot", title: "截屏", render: () => <Screenshot node={focused} /> },
     { key: "actions", title: "动作", render: () => <Actions node={focused} /> },
     { key: "audit", title: "审计", render: () => <Audit /> },
-    ...(isAdmin ? [
-      { key: "keys", title: "密钥", render: () => <Keys /> },
-    ] as WinApp[] : []),
   ] : [];
 
   return (

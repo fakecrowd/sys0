@@ -157,6 +157,15 @@ async function req<T>(method: string, path: string, body?: any, _retried = false
   return res.json() as Promise<T>;
 }
 
+export type AccountKey = {
+  id: string;
+  name: string;
+  owner: string;
+  methodScope: string;
+  createdAt: number;
+  revokedAt: number;
+};
+
 export type Select = { nodes?: string[]; tags?: string[]; all?: boolean };
 
 export const api = {
@@ -194,10 +203,12 @@ export const api = {
   dismissRescue: (id: string) => req<{ ok: boolean; error?: string }>("POST", `/api/v1/nodes/${id}/dismiss-rescue`, {}),
   rescueCommand: (id: string, kind: string) =>
     req<{ ok: boolean; error?: string; command?: any }>("POST", `/api/v1/nodes/${id}/rescue-command`, { kind }),
-  keysList: () => req<{ ok: boolean; keys: any[] }>("GET", "/api/v1/keys"),
-  keyCreate: (body: any) =>
-    req<{ ok: boolean; key?: string; id?: string; error?: string }>("POST", "/api/v1/keys", body),
-  keyRevoke: (id: string) => req<{ ok: boolean }>("DELETE", "/api/v1/keys/" + id),
+  myKeysList: () => req<{ ok: boolean; keys: AccountKey[] }>("GET", "/api/v1/me/keys"),
+  myKeyCreate: (body: { name: string; methodScope: string[] }) =>
+    req<{ ok: boolean; key?: string; record?: AccountKey; error?: string }>("POST", "/api/v1/me/keys", body),
+  myKeyRevoke: (id: string) => req<{ ok: boolean; error?: string }>("DELETE", "/api/v1/me/keys/" + id),
+  keysList: () => req<{ ok: boolean; keys: AccountKey[] }>("GET", "/api/v1/keys"),
+  keyRevoke: (id: string) => req<{ ok: boolean; error?: string }>("DELETE", "/api/v1/keys/" + id),
 
   // --- first-run setup ---
   setupStatus: () => req<{ ok: boolean; needsSetup: boolean }>("GET", "/api/v1/setup/status"),

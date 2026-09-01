@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -50,16 +51,20 @@ type Setting struct {
 }
 
 type APIKey struct {
-	ID             string `gorm:"primaryKey"`
-	Name           string
-	SecretHash     string
+	ID          string `gorm:"primaryKey"`
+	Name        string
+	Owner       string `gorm:"index"` // username; live role/node permissions come from this account
+	SecretHash  string
+	MethodScope string // optional per-key narrowing; never expands the owner's permissions
+	RateLimit   int    // legacy compatibility; not exposed as an enforced control
+	CreatedAt   int64
+	RevokedAt   int64
+
+	// Legacy-only safety restrictions. New account keys leave these zero-valued.
+	// Keep the old columns so migration never expands an existing key's access.
 	Role           string
 	NodeScope      string
-	MethodScope    string
 	AllowDangerous bool
-	RateLimit      int
-	CreatedAt      int64
-	RevokedAt      int64
 }
 
 type Audit struct {
@@ -105,7 +110,11 @@ func OpenStore(path string) (*Store, error) {
 	if err := db.AutoMigrate(&Node{}, &User{}, &Setting{}, &APIKey{}, &Audit{}, &Sample{}); err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	s := &Store{db: db}
+	if err := s.backfillLegacyKeyOwners(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func (s *Store) Close() error {
@@ -313,7 +322,17 @@ func (s *Store) SetUserPassword(id uint, secret string) error {
 }
 
 func (s *Store) DeleteUser(id uint) error {
-	return s.db.Where("id = ?", id).Delete(&User{}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var u User
+		if err := tx.First(&u, id).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&APIKey{}).Where("owner = ? AND revoked_at = 0", u.Username).
+			Update("revoked_at", time.Now().Unix()).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&u).Error
+	})
 }
 
 // CountAdmins returns the number of admin users (guard against deleting the last one).
@@ -366,31 +385,56 @@ func (s *Store) SetSetting(key, value string) error {
 
 // ---- api keys ----
 
-// KeyRecord is the API-facing view of an api key (no secret).
+// KeyRecord is the API-facing view of an account-owned key (never the secret).
 type KeyRecord struct {
-	ID, Name, Role         string
-	NodeScope, MethodScope string
-	AllowDangerous         bool
-	RateLimit              int
-	CreatedAt, RevokedAt   int64
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Owner       string `json:"owner"`
+	MethodScope string `json:"methodScope"`
+	CreatedAt   int64  `json:"createdAt"`
+	RevokedAt   int64  `json:"revokedAt"`
+
+	legacyRole           string
+	legacyNodeScope      string
+	legacyAllowDangerous bool
 }
 
 func keyView(k APIKey) KeyRecord {
 	return KeyRecord{
-		ID: k.ID, Name: k.Name, Role: k.Role,
-		NodeScope: k.NodeScope, MethodScope: k.MethodScope,
-		AllowDangerous: k.AllowDangerous, RateLimit: k.RateLimit,
+		ID: k.ID, Name: k.Name, Owner: k.Owner, MethodScope: k.MethodScope,
 		CreatedAt: k.CreatedAt, RevokedAt: k.RevokedAt,
+		legacyRole: k.Role, legacyNodeScope: k.NodeScope, legacyAllowDangerous: k.AllowDangerous,
 	}
 }
 
-func (s *Store) CreateKey(name, role string, nodeScope, methodScope []string, allowDangerous bool, rate int) (string, KeyRecord, error) {
-	secret := "sk_" + randHexS(20)
-	k := APIKey{
-		ID: "k" + randHexS(4), Name: name, SecretHash: hashSecret(secret), Role: role,
-		NodeScope: strings.Join(nodeScope, ","), MethodScope: strings.Join(methodScope, ","),
-		AllowDangerous: allowDangerous, RateLimit: rate, CreatedAt: time.Now().Unix(),
+// backfillLegacyKeyOwners keeps pre-account-key credentials usable after the
+// migration by assigning unowned keys to the first admin account. If setup has
+// not created an admin yet there cannot be a useful legacy owner, so it is a no-op.
+func (s *Store) backfillLegacyKeyOwners() error {
+	var admin User
+	if err := s.db.Where("role = ?", "admin").Order("id").First(&admin).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
 	}
+	return s.db.Model(&APIKey{}).Where("owner = '' OR owner IS NULL").Update("owner", admin.Username).Error
+}
+
+func (s *Store) CreateAccountKey(owner, name string, methodScope []string, rate int) (string, KeyRecord, error) {
+	if _, ok := s.GetUser(owner); !ok {
+		return "", KeyRecord{}, fmt.Errorf("owner not found")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = "mcp-http"
+	}
+	if rate < 0 {
+		rate = 0
+	}
+	secret := "sk_" + randHexS(20)
+	k := APIKey{ID: "k" + randHexS(4), Name: name, Owner: owner, SecretHash: hashSecret(secret),
+		MethodScope: strings.Join(methodScope, ","), RateLimit: rate, CreatedAt: time.Now().Unix()}
 	if err := s.db.Create(&k).Error; err != nil {
 		return "", KeyRecord{}, err
 	}
@@ -422,8 +466,26 @@ func (s *Store) ListKeys() ([]KeyRecord, error) {
 	return out, nil
 }
 
+func (s *Store) ListKeysForOwner(owner string) ([]KeyRecord, error) {
+	var keys []APIKey
+	if err := s.db.Where("owner = ? AND revoked_at = 0", owner).Order("created_at desc").Find(&keys).Error; err != nil {
+		return nil, err
+	}
+	out := make([]KeyRecord, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, keyView(k))
+	}
+	return out, nil
+}
+
 func (s *Store) RevokeKey(id string) error {
 	return s.db.Model(&APIKey{}).Where("id = ?", id).Update("revoked_at", time.Now().Unix()).Error
+}
+
+func (s *Store) RevokeKeyForOwner(id, owner string) (bool, error) {
+	r := s.db.Model(&APIKey{}).Where("id = ? AND owner = ? AND revoked_at = 0", id, owner).
+		Update("revoked_at", time.Now().Unix())
+	return r.RowsAffected == 1, r.Error
 }
 
 // ---- audit ----

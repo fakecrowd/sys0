@@ -62,6 +62,9 @@ func (h *Hub) Router() http.Handler {
 	auth := v1.Group("", h.authMW())
 	auth.GET("/me", h.apiMe)
 	auth.POST("/me/password", h.apiChangeOwnPassword)
+	auth.GET("/me/keys", h.apiListOwnKeys)
+	auth.POST("/me/keys", h.apiCreateOwnKey)
+	auth.DELETE("/me/keys/:id", h.apiRevokeOwnKey)
 	auth.GET("/nodes", h.apiNodes)
 	auth.GET("/nodes/:id", h.apiNode)
 	auth.POST("/nodes/:id/label", h.apiNodeLabel)
@@ -76,8 +79,7 @@ func (h *Hub) Router() http.Handler {
 	auth.GET("/events", h.apiEvents)
 
 	admin := v1.Group("", h.adminMW())
-	admin.GET("/keys", h.apiListKeys)
-	admin.POST("/keys", h.apiCreateKey)
+	admin.GET("/keys", h.apiListKeys) // all-account key audit
 	admin.DELETE("/keys/:id", h.apiRevokeKey)
 	admin.GET("/users", h.apiListUsers)
 	admin.POST("/users", h.apiCreateUser)
@@ -386,8 +388,13 @@ func (h *Hub) apiEvents(c *gin.Context) {
 	}
 }
 
-func (h *Hub) apiListKeys(c *gin.Context) {
-	keys, err := h.store.ListKeys()
+func (h *Hub) apiListOwnKeys(c *gin.Context) {
+	a := actorOf(c)
+	if a.Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
+	keys, err := h.store.ListKeysForOwner(a.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
@@ -395,27 +402,79 @@ func (h *Hub) apiListKeys(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true, "keys": keys})
 }
 
-func (h *Hub) apiCreateKey(c *gin.Context) {
+func normalizedMethods(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, m := range in {
+		m = strings.TrimSpace(m)
+		if m == "" || len(m) > 96 || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	return out
+}
+
+func (h *Hub) apiCreateOwnKey(c *gin.Context) {
+	a := actorOf(c)
+	if a.Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
 	var body struct {
-		Name           string   `json:"name"`
-		Role           string   `json:"role"`
-		NodeScope      []string `json:"nodeScope"`
-		MethodScope    []string `json:"methodScope"`
-		AllowDangerous bool     `json:"allowDangerous"`
-		RateLimit      int      `json:"rateLimit"`
+		Name        string   `json:"name"`
+		MethodScope []string `json:"methodScope"`
 	}
 	if c.BindJSON(&body) != nil {
 		return
 	}
-	if body.Role == "" {
-		body.Role = "operator"
+	body.Name = strings.TrimSpace(body.Name)
+	if len(body.Name) > 80 {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "name too long"})
+		return
 	}
-	secret, rec, err := h.store.CreateKey(body.Name, body.Role, body.NodeScope, body.MethodScope, body.AllowDangerous, body.RateLimit)
+	methods := normalizedMethods(body.MethodScope)
+	for _, method := range methods {
+		if _, ok := wire.MethodIndex[method]; !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "unknown method in scope: " + method})
+			return
+		}
+	}
+	secret, rec, err := h.store.CreateAccountKey(a.ID, body.Name, methods, 0)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "key": secret, "id": rec.ID, "note": "store this key now; it will not be shown again"})
+	c.JSON(http.StatusOK, gin.H{"ok": true, "key": secret, "record": rec, "note": "store this key now; it will not be shown again"})
+}
+
+func (h *Hub) apiRevokeOwnKey(c *gin.Context) {
+	a := actorOf(c)
+	if a.Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
+	changed, err := h.store.RevokeKeyForOwner(c.Param("id"), a.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	if !changed {
+		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "key not found"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// Admin audit: list every account's active keys and revoke compromised keys.
+func (h *Hub) apiListKeys(c *gin.Context) {
+	keys, err := h.store.ListKeys()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "keys": keys})
 }
 
 func (h *Hub) apiRevokeKey(c *gin.Context) {

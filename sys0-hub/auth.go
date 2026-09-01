@@ -66,19 +66,40 @@ func (h *Hub) actorFromRequest(r *http.Request) (Actor, bool) {
 	if tok == "" {
 		return Actor{}, false
 	}
-	// API key path
+	// Account-owned API key path. Resolve the owner on EVERY request so account
+	// role/scope changes and deletion take effect immediately. The key may narrow
+	// methods, but it can never carry an independent role/node/dangerous grant.
 	if strings.HasPrefix(tok, "sk_") {
-		if rec, ok := h.store.AuthKey(tok); ok {
-			scope := splitScope(rec.NodeScope)
-			return Actor{
-				Kind: "key", ID: rec.ID, Role: rec.Role,
-				ScopeAll:       len(scope) == 0, // unrestricted key = all nodes
-				NodeScope:      scope,
-				MethodScope:    splitScope(rec.MethodScope),
-				AllowDangerous: rec.AllowDangerous,
-			}, true
+		rec, ok := h.store.AuthKey(tok)
+		if !ok || rec.Owner == "" {
+			return Actor{}, false
 		}
-		return Actor{}, false
+		u, found := h.store.GetUser(rec.Owner)
+		if !found {
+			return Actor{}, false
+		}
+		isAdmin := u.Role == "admin"
+		scopeAll, nodeScope := isAdmin, u.NodeScope
+		allowDangerous := isAdmin
+		// Keys created before account ownership could carry narrower node and
+		// dangerous-method restrictions. Preserve those as an intersection during
+		// migration; they may only reduce the owner's live permissions.
+		if rec.legacyRole != "" {
+			if legacyScope := splitScope(rec.legacyNodeScope); len(legacyScope) > 0 {
+				scopeAll = false
+				if isAdmin {
+					nodeScope = legacyScope
+				} else {
+					nodeScope = intersectScope(u.NodeScope, legacyScope)
+				}
+			}
+			allowDangerous = isAdmin && rec.legacyAllowDangerous
+		}
+		return Actor{
+			Kind: "key", ID: rec.ID, Role: u.Role,
+			ScopeAll: scopeAll, NodeScope: nodeScope,
+			MethodScope: splitScope(rec.MethodScope), AllowDangerous: allowDangerous,
+		}, true
 	}
 	// JWT path — resolve the live user so role/scope changes take effect.
 	if c, ok := h.verifyToken(tok); ok {
@@ -89,12 +110,26 @@ func (h *Hub) actorFromRequest(r *http.Request) (Actor, bool) {
 		isAdmin := u.Role == "admin"
 		return Actor{
 			Kind: "user", ID: u.Username, Role: u.Role,
-			ScopeAll:       isAdmin,        // admins see every node
-			NodeScope:      u.NodeScope,    // members restricted to their list
-			AllowDangerous: isAdmin,        // only admins may run dangerous methods
+			ScopeAll:       isAdmin,     // admins see every node
+			NodeScope:      u.NodeScope, // members restricted to their list
+			AllowDangerous: isAdmin,     // only admins may run dangerous methods
 		}, true
 	}
 	return Actor{}, false
+}
+
+func intersectScope(a, b []string) []string {
+	allowed := make(map[string]struct{}, len(b))
+	for _, id := range b {
+		allowed[id] = struct{}{}
+	}
+	out := make([]string, 0, len(a))
+	for _, id := range a {
+		if _, ok := allowed[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
