@@ -39,6 +39,7 @@ type shellSession struct {
 	pty     pty.Pty
 	cmd     *pty.Cmd
 	buf     []byte // ring buffer of recent output
+	seq     uint64 // monotonic output chunk sequence; never reset
 }
 
 func (s *shellSession) info() wire.ShellInfo {
@@ -50,13 +51,22 @@ func (s *shellSession) info() wire.ShellInfo {
 	}
 }
 
-func (s *shellSession) append(b []byte) {
+func (s *shellSession) append(b []byte) uint64 {
 	s.mu.Lock()
 	s.buf = append(s.buf, b...)
 	if len(s.buf) > shellBufferCap {
 		s.buf = s.buf[len(s.buf)-shellBufferCap:]
 	}
+	s.seq++
+	seq := s.seq
 	s.mu.Unlock()
+	return seq
+}
+
+func (s *shellSession) snapshot() ([]byte, uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]byte(nil), s.buf...), s.seq
 }
 
 type shellManager struct {
@@ -129,18 +139,17 @@ func (a *Agent) doShellOpen(params json.RawMessage) (any, *rpc.Error) {
 			}
 		}()
 		buf := make([]byte, 8192)
-		seq := 0
 		for {
 			n, rerr := ptmx.Read(buf)
 			if n > 0 {
-				sess.append(buf[:n])
-				seq++
-				data, _ := json.Marshal(map[string]string{
+				seq := sess.append(buf[:n])
+				data, _ := json.Marshal(map[string]any{
 					"session": id,
 					"chunk":   base64.StdEncoding.EncodeToString(buf[:n]),
+					"seq":     seq,
 				})
 				if peer := a.currentPeer(); peer != nil {
-					peer.Notify(wire.MethodEmit, wire.EmitParams{Chan: "shell", Seq: seq, Data: data})
+					peer.Notify(wire.MethodEmit, wire.EmitParams{Chan: "shell", Seq: int(seq), Data: data})
 				}
 			}
 			if rerr != nil {
@@ -253,11 +262,11 @@ func (a *Agent) doShellOutput(params json.RawMessage) (any, *rpc.Error) {
 	if sess == nil {
 		return nil, rpc.Errorf(rpc.CodeBadParams, "no such session")
 	}
+	buf, seq := sess.snapshot()
 	sess.mu.Lock()
-	data := base64.StdEncoding.EncodeToString(sess.buf)
 	state, exit := sess.state, sess.exit
 	sess.mu.Unlock()
-	return wire.ShellOutputResult{Session: sess.id, Data: data, State: state, Exit: exit}, nil
+	return wire.ShellOutputResult{Session: sess.id, Data: base64.StdEncoding.EncodeToString(buf), Seq: seq, State: state, Exit: exit}, nil
 }
 
 func (a *Agent) closeShell(id string) {

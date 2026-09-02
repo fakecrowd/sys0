@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { api } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { api, getUser } from "../api";
+import { loadRecent, saveRecent, takeLegacyScreenshotHistory } from "../nodeWorkspace";
 
 // Screenshot captures the FOCUSED node's screen on demand. Node is fixed by the
 // workspace. Controls expose the agent's host.screenshot knobs:
@@ -26,56 +27,33 @@ const WIDTHS = [
 ];
 
 const TTL_MS = 24 * 60 * 60 * 1000; // keep history for 24 hours
-const MAX_BYTES = 4 * 1024 * 1024; // ~4MB per-node budget (localStorage is ~5MB total)
-
-const keyFor = (node: string) => `sys0_shots_v1:${node}`;
-
-function loadHist(node: string): HistShot[] {
-  try {
-    const raw = localStorage.getItem(keyFor(node));
-    const arr = raw ? (JSON.parse(raw) as HistShot[]) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch {
-    return [];
-  }
-}
-
-// prune drops entries older than 24h, then enforces the byte budget (oldest out).
 function prune(list: HistShot[]): HistShot[] {
   const cutoff = Date.now() - TTL_MS;
-  const fresh = list.filter((s) => s.ts >= cutoff).sort((a, b) => b.ts - a.ts);
-  const out: HistShot[] = [];
-  let total = 0;
-  for (const s of fresh) {
-    total += s.data.length;
-    if (out.length > 0 && total > MAX_BYTES) break;
-    out.push(s);
-  }
-  return out;
+  return list.filter((shot) => shot.ts >= cutoff).sort((a, b) => b.ts - a.ts);
 }
 
-// save prunes then writes; on QuotaExceeded it drops the oldest and retries.
-function save(node: string, list: HistShot[]): HistShot[] {
-  let l = prune(list);
-  while (l.length > 0) {
-    try {
-      localStorage.setItem(keyFor(node), JSON.stringify(l));
-      return l;
-    } catch {
-      l = l.slice(0, -1); // evict oldest, retry
-    }
-  }
-  try {
-    localStorage.removeItem(keyFor(node));
-  } catch {
-    /* ignore */
-  }
-  return l;
+function loadHist(account: string, node: string): HistShot[] {
+  const recent = loadRecent<{ shots: HistShot[] }>(localStorage, account, node, "screenshots");
+  if (recent?.data.shots) return recent.data.shots;
+  return [];
+}
+
+function save(account: string, node: string, list: HistShot[]): HistShot[] {
+  let shots = prune(list);
+  while (shots.length > 0 && !saveRecent(localStorage, account, node, "screenshots", { shots })) shots = shots.slice(0, -1);
+  if (shots.length === 0) saveRecent(localStorage, account, node, "screenshots", { shots });
+  return shots;
 }
 
 const fmtTime = (ts: number) => new Date(ts).toLocaleTimeString();
 
-export function Screenshot({ node }: { node: string }) {
+export function Screenshot({ node, online }: { node: string; online: boolean }) {
+  const account = useRef(getUser()).current;
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  useEffect(() => {
+    return () => { onlineRef.current = false; };
+  }, []);
   const [maxWidth, setMaxWidth] = useState(1280);
   const [format, setFormat] = useState<"jpeg" | "png">("jpeg");
   const [quality, setQuality] = useState(80);
@@ -88,14 +66,14 @@ export function Screenshot({ node }: { node: string }) {
   // On mount / node change: load history, prune expired immediately, and keep a
   // 1-minute timer pruning so 24h-old shots vanish on their own without a reload.
   useEffect(() => {
-    const initial = save(node, loadHist(node));
+    const initial = save(account, node, loadHist(account, node));
     setHist(initial);
     setSelId(initial[0]?.id || "");
     const t = setInterval(() => {
       setHist((cur) => {
         const next = prune(cur);
         if (next.length !== cur.length) {
-          save(node, next);
+          save(account, node, next);
           return next;
         }
         return cur;
@@ -105,18 +83,20 @@ export function Screenshot({ node }: { node: string }) {
   }, [node]);
 
   const capture = async () => {
+    if (!onlineRef.current) return;
     setBusy(true);
     setErr("");
     try {
       const v = (await api.one(node, "host.screenshot", {
         display, maxWidth, format, quality,
       })) as Shot;
+      if (!onlineRef.current) return;
       const entry: HistShot = {
         ...v,
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         ts: Date.now(),
       };
-      const next = save(node, [entry, ...hist]);
+      const next = save(account, node, [entry, ...hist]);
       setHist(next);
       setSelId(entry.id);
     } catch (e: any) {
@@ -127,13 +107,13 @@ export function Screenshot({ node }: { node: string }) {
   };
 
   const remove = (id: string) => {
-    const next = save(node, hist.filter((s) => s.id !== id));
+    const next = save(account, node, hist.filter((s) => s.id !== id));
     setHist(next);
     if (selId === id) setSelId(next[0]?.id || "");
   };
 
   const clearAll = () => {
-    save(node, []);
+    save(account, node, []);
     setHist([]);
     setSelId("");
   };
@@ -145,7 +125,7 @@ export function Screenshot({ node }: { node: string }) {
   return (
     <div className="flex flex-col gap-2" style={{ height: "100%" }}>
       <div className="flex flex-wrap items-center gap-2">
-        <button className="btn" onClick={capture} disabled={busy || !node}>
+        <button className="btn" onClick={capture} disabled={busy || !node || !online}>
           {busy ? "截取中…" : "截屏"}
         </button>
 

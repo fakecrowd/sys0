@@ -1,10 +1,16 @@
-import { useEffect, useState } from "react";
-import { api, type MethodSpec, type DispatchItem } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { api, getUser, type MethodSpec, type DispatchItem } from "../api";
 
 // Generic, self-describing action runner: pick any (non-interactive) method,
 // fill a form generated from its JSON Schema, run it on the FOCUSED node.
 // Node is fixed by the workspace — no batch / all-nodes targeting.
-export function Actions({ node }: { node: string }) {
+export function Actions({ node, online }: { node: string; online: boolean }) {
+  const account = useRef(getUser()).current;
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  useEffect(() => {
+    return () => { onlineRef.current = false; };
+  }, []);
   const [methods, setMethods] = useState<MethodSpec[]>([]);
   const [sel, setSel] = useState<string>("");
   const [form, setForm] = useState<Record<string, any>>({});
@@ -31,6 +37,7 @@ export function Actions({ node }: { node: string }) {
   const setField = (k: string, v: any) => setForm((f) => ({ ...f, [k]: v }));
 
   const run = async () => {
+    if (!onlineRef.current) return;
     setBusy(true); setErr("");
     const params: Record<string, any> = {};
     for (const [k, schema] of Object.entries(props)) {
@@ -41,7 +48,9 @@ export function Actions({ node }: { node: string }) {
         t === "array" ? String(raw).split(",").map((s) => s.trim()).filter(Boolean) : raw;
     }
     try {
+      if (!onlineRef.current) return;
       const r = await api.dispatch({ nodes: [node] }, sel, params, dry);
+      if (!onlineRef.current) return;
       if (r.ok) setItems(r.items || []);
       else setErr(`${r.error} (code ${r.code})`);
     } catch (e) { setErr(String(e)); } finally { setBusy(false); }
@@ -57,7 +66,7 @@ export function Actions({ node }: { node: string }) {
         <label className="flex items-center gap-1 cursor-pointer mono-sm">
           <input type="checkbox" checked={dry} onChange={(e) => setDry(e.target.checked)} /> dryRun
         </label>
-        <button className="btn btn-accent" disabled={busy || !sel} onClick={run}>执行 · {node}</button>
+        <button className="btn btn-accent" disabled={busy || !sel || !online} onClick={run}>执行 · {node}</button>
       </div>
       {spec && <div className="mono-sm" style={{ color: "var(--muted)" }}>{spec.description}</div>}
 

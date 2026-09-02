@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api, getUser, } from "../api";
+import { loadRecent, saveRecent } from "../nodeWorkspace";
 
 // Live host metrics for the FOCUSED node. Node is fixed by the workspace.
 // Auto-starts host.watch on mount (no manual button). Keeps a rolling history
@@ -12,22 +13,32 @@ type Sample = {
   load1: number; diskPct: number; rxRate: number; txRate: number; procs: number;
 };
 
-export function Monitor({ node, live }: { node: string; live: Record<string, any> }) {
-  const [hist, setHist] = useState<Sample[]>([]);
+export function Monitor({ node, live, online }: { node: string; live: Record<string, any>; online: boolean }) {
+  const account = useRef(getUser()).current;
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  const recent = loadRecent<{ hist: Sample[]; metric: any }>(localStorage, account, node, "monitor");
+  const [hist, setHist] = useState<Sample[]>(recent?.data.hist || []);
+  const [cachedMetric, setCachedMetric] = useState<any>(recent?.data.metric || null);
+  const [savedAt, setSavedAt] = useState(recent?.savedAt || 0);
   const prevNet = useRef<{ ts: number; rx: number; tx: number } | null>(null);
-  const m = live[node];
+  const liveMetric = live[node];
+  const m = liveMetric || cachedMetric;
 
   // Auto-start watching on mount; stop on unmount. Re-runs if node changes
   // (but the window remounts per workspace, so node is effectively constant).
   useEffect(() => {
-    if (!node) return;
+    if (!node || !online) return;
     api.dispatch({ nodes: [node] }, "host.watch", { enable: true, interval: 2 }).catch(() => {});
-    return () => { api.dispatch({ nodes: [node] }, "host.watch", { enable: false }).catch(() => {}); };
-  }, [node]);
+    return () => {
+      if (onlineRef.current) api.dispatch({ nodes: [node] }, "host.watch", { enable: false }).catch(() => {});
+    };
+  }, [node, online]);
 
   // Fold each incoming metrics sample into rolling history (derive net rates).
   useEffect(() => {
-    if (!m || typeof m.ts !== "number") return;
+    if (!onlineRef.current || !liveMetric || typeof liveMetric.ts !== "number") return;
+    const m = liveMetric;
     let rxRate = 0, txRate = 0;
     const p = prevNet.current;
     if (p && m.ts > p.ts) {
@@ -49,9 +60,14 @@ export function Monitor({ node, live }: { node: string; live: Record<string, any
       // de-dup same-ts (SSE can repeat) and cap length
       if (h.length && h[h.length - 1].ts === s.ts) return h;
       const next = [...h, s];
-      return next.length > HISTORY ? next.slice(next.length - HISTORY) : next;
+      const kept = next.length > HISTORY ? next.slice(next.length - HISTORY) : next;
+      const now = Date.now();
+      saveRecent(localStorage, account, node, "monitor", { hist: kept, metric: m }, now);
+      setSavedAt(now);
+      return kept;
     });
-  }, [m]);
+    setCachedMetric(m);
+  }, [liveMetric, node]);
 
   if (!node) return <div className="mono-sm">未选择节点</div>;
 
@@ -66,12 +82,15 @@ export function Monitor({ node, live }: { node: string; live: Record<string, any
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="dot" style={{ background: m ? "var(--accent)" : "var(--muted)" }} />
-        <span className="mono-sm">{node} · 实时监控（自动开启）</span>
+        <span className="dot" style={{ background: online ? "var(--accent)" : "var(--muted)" }} />
+        <span className="mono-sm">{node} · {online ? "实时监控" : "最近记录"}</span>
         {m && <span className="mono-sm" style={{ color: "var(--muted)" }}>
           {fmtUptime(m.uptimeSec)} · {m.procs ?? 0} 进程
         </span>}
-        {!m && <span className="mono-sm">等待数据…</span>}
+        {!m && <span className="mono-sm">暂无历史数据</span>}
+        {!online && savedAt > 0 && <span className="mono-sm" style={{ color: "var(--muted)" }}>
+          · {new Date(savedAt).toLocaleString()}
+        </span>}
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

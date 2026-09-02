@@ -1,12 +1,21 @@
 import { useEffect, useRef, useState } from "react";
-import { api } from "../api";
+import { api, getUser, } from "../api";
 import { confirmDialog, alertDialog } from "./dialogs";
+import { loadRecent, saveRecent } from "../nodeWorkspace";
 
 // Process list for the FOCUSED node. Node is fixed by the workspace.
 // Optional auto-refresh (default OFF) re-lists every few seconds.
-export function Processes({ node }: { node: string }) {
+export function Processes({ node, online }: { node: string; online: boolean }) {
+  const account = useRef(getUser()).current;
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  useEffect(() => {
+    return () => { onlineRef.current = false; };
+  }, []);
+  const recent = loadRecent<{ procs: any[] }>(localStorage, account, node, "processes");
   const [filter, setFilter] = useState("");
-  const [procs, setProcs] = useState<any[]>([]);
+  const [procs, setProcs] = useState<any[]>(recent?.data.procs || []);
+  const [savedAt, setSavedAt] = useState(recent?.savedAt || 0);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [auto, setAuto] = useState(false); // auto-refresh, default off
@@ -14,43 +23,48 @@ export function Processes({ node }: { node: string }) {
   useEffect(() => { filterRef.current = filter; }, [filter]);
 
   const load = async () => {
-    if (!node) return;
+    if (!node || !onlineRef.current) return;
     setBusy(true); setErr("");
     try {
       const v = await api.one(node, "proc.list", { filter: filterRef.current });
-      setProcs((v.procs || []).sort((a: any, b: any) => (b.self ? 1 : 0) - (a.self ? 1 : 0) || b.rss - a.rss));
+      if (!onlineRef.current) return;
+      const next = (v.procs || []).sort((a: any, b: any) => (b.self ? 1 : 0) - (a.self ? 1 : 0) || b.rss - a.rss);
+      const now = Date.now();
+      setProcs(next); setSavedAt(now);
+      saveRecent(localStorage, account, node, "processes", { procs: next }, now);
     } catch (e) { setErr(String(e)); } finally { setBusy(false); }
   };
 
   // auto-refresh loop
   useEffect(() => {
-    if (!auto) return;
+    if (!auto || !online) return;
     load(); // immediate refresh when toggled on
     const t = setInterval(load, 3000);
     return () => clearInterval(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [auto, node]);
+  }, [auto, node, online]);
 
   const kill = async (pid: number, name: string, sig: string) => {
-    if (!(await confirmDialog(`${sig} ${name}（pid ${pid}）@ ${node}?`, { title: "结束进程", danger: sig === "KILL" }))) return;
-    try { await api.one(node, "proc.signal", { pid, sig }); setTimeout(load, 300); }
+    if (!(await confirmDialog(`${sig} ${name}（pid ${pid}）@ ${node}?`, { title: "结束进程", danger: sig === "KILL" })) || !onlineRef.current) return;
+    try { await api.one(node, "proc.signal", { pid, sig }); if (onlineRef.current) setTimeout(load, 300); }
     catch (e) { alertDialog(String(e), { title: "操作失败" }); }
   };
 
   return (
     <div className="flex flex-col gap-3 h-full">
       <div className="flex gap-2 items-center flex-wrap">
-        <input className="input" style={{ flex: 1, minWidth: 140 }} placeholder="filter by name" value={filter}
+        <input className="input" style={{ flex: 1, minWidth: 140 }} placeholder="filter by name" value={filter} disabled={!online}
           onChange={(e) => setFilter(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
-        <button className="btn btn-accent" disabled={busy || !node} onClick={load}>列出</button>
+        <button className="btn btn-accent" disabled={busy || !node || !online} onClick={load}>列出</button>
         <label className="flex items-center gap-1 cursor-pointer mono-sm" title="每 3 秒自动刷新">
-          <input type="checkbox" checked={auto} onChange={(e) => setAuto(e.target.checked)}
+          <input type="checkbox" checked={auto} disabled={!online} onChange={(e) => setAuto(e.target.checked)}
             style={{ accentColor: "var(--accent)" }} />
           自动刷新
         </label>
-        {auto && <span className="dot" style={{ background: "var(--accent)", boxShadow: "0 0 6px var(--accent)" }} title="自动刷新中" />}
+        {auto && online && <span className="dot" style={{ background: "var(--accent)", boxShadow: "0 0 6px var(--accent)" }} title="自动刷新中" />}
       </div>
-      {err && <div style={{ color: "var(--danger)" }}>{err}</div>}
+      {!online && <div className="mono-sm" style={{ color: "var(--muted)" }}>{savedAt ? `记录于 ${new Date(savedAt).toLocaleString()}` : "暂无历史数据"}</div>}
+      {err && online && <div style={{ color: "var(--danger)" }}>{err}</div>}
       <div className="panel flex-1 overflow-auto">
         <table className="w-full" style={{ borderCollapse: "collapse" }}>
           <thead>
@@ -72,12 +86,12 @@ export function Processes({ node }: { node: string }) {
                   {p.self && <span className="tag ml-1" style={{ color: "var(--accent)", borderColor: "var(--accent)" }} title="当前 sys0 agent 进程">agent</span>}
                 </td>
                 <td className="px-3 py-1">
-                  <button className="btn" style={{ padding: "1px 6px" }} onClick={() => kill(p.pid, p.name, "TERM")}>TERM</button>{" "}
-                  <button className="btn" style={{ padding: "1px 6px", color: "var(--danger)" }} onClick={() => kill(p.pid, p.name, "KILL")}>KILL</button>
+                  <button className="btn" style={{ padding: "1px 6px" }} disabled={!online} onClick={() => kill(p.pid, p.name, "TERM")}>TERM</button>{" "}
+                  <button className="btn" style={{ padding: "1px 6px", color: "var(--danger)" }} disabled={!online} onClick={() => kill(p.pid, p.name, "KILL")}>KILL</button>
                 </td>
               </tr>
             ))}
-            {procs.length === 0 && <tr><td colSpan={6} className="px-3 py-4 mono-sm">点「列出」加载进程</td></tr>}
+            {procs.length === 0 && <tr><td colSpan={6} className="px-3 py-4 mono-sm">{online ? "点「列出」加载进程" : "暂无历史数据"}</td></tr>}
           </tbody>
         </table>
       </div>

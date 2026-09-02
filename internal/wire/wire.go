@@ -15,24 +15,24 @@ const (
 	MethodShutdown  = "node.shutdown"
 
 	// node capabilities (invoked via dispatch)
-	MethodShellRun    = "shell.run"
-	MethodShellOpen   = "shell.open" // interactive PTY session
-	MethodShellInput  = "shell.input"
-	MethodShellResize = "shell.resize"
-	MethodShellClose  = "shell.close"
-	MethodShellList   = "shell.list"   // list persistent PTY shells on the node
-	MethodShellOutput = "shell.output" // fetch a shell's buffered scrollback
-	MethodHostInfo    = "host.info"
-	MethodHostMetrics = "host.metrics"
-	MethodHostWatch   = "host.watch"
+	MethodShellRun       = "shell.run"
+	MethodShellOpen      = "shell.open" // interactive PTY session
+	MethodShellInput     = "shell.input"
+	MethodShellResize    = "shell.resize"
+	MethodShellClose     = "shell.close"
+	MethodShellList      = "shell.list"   // list persistent PTY shells on the node
+	MethodShellOutput    = "shell.output" // fetch a shell's buffered scrollback
+	MethodHostInfo       = "host.info"
+	MethodHostMetrics    = "host.metrics"
+	MethodHostWatch      = "host.watch"
 	MethodHostScreenshot = "host.screenshot"
-	MethodProcList    = "proc.list"
-	MethodProcSignal  = "proc.signal"
-	MethodFsLs        = "fs.ls"
-	MethodFsStat      = "fs.stat"
-	MethodFsGet       = "fs.get"
-	MethodFsPut       = "fs.put"
-	MethodFsRm        = "fs.rm"
+	MethodProcList       = "proc.list"
+	MethodProcSignal     = "proc.signal"
+	MethodFsLs           = "fs.ls"
+	MethodFsStat         = "fs.stat"
+	MethodFsGet          = "fs.get"
+	MethodFsPut          = "fs.put"
+	MethodFsRm           = "fs.rm"
 
 	// managed processes (long-running supervised child processes)
 	MethodTaskStart   = "task.start"
@@ -122,6 +122,7 @@ type ShellRefParams struct {
 type ShellOutputResult struct {
 	Session string `json:"session"`
 	Data    string `json:"data"` // base64 of the recent output ring buffer
+	Seq     uint64 `json:"seq"`  // last output chunk included in Data
 	State   string `json:"state"`
 	Exit    int    `json:"exit"`
 }
@@ -179,6 +180,7 @@ type TaskRefParams struct {
 type TaskOutputResult struct {
 	Task  string `json:"task"`
 	Data  string `json:"data"` // base64 of recent output buffer
+	Seq   uint64 `json:"seq"`  // last output chunk included in Data
 	State string `json:"state"`
 	Exit  int    `json:"exit"`
 }
@@ -227,9 +229,9 @@ type Metrics struct {
 	Load15    float64   `json:"load15"`
 	NetRx     uint64    `json:"netRx"` // cumulative bytes
 	NetTx     uint64    `json:"netTx"`
-	DiskUsed  uint64    `json:"diskUsed"`  // root/system volume
+	DiskUsed  uint64    `json:"diskUsed"` // root/system volume
 	DiskTotal uint64    `json:"diskTotal"`
-	Procs     int       `json:"procs"`     // process count
+	Procs     int       `json:"procs"` // process count
 	UptimeSec uint64    `json:"uptimeSec"`
 }
 
@@ -320,9 +322,9 @@ type ScreenshotResult struct {
 	Format string `json:"format"` // jpeg | png
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
-	Size   int64  `json:"size"`    // encoded byte length
-	Data   string `json:"data"`    // base64 of the encoded image
-	Tool   string `json:"tool"`    // capture backend used (for diagnostics)
+	Size   int64  `json:"size"` // encoded byte length
+	Data   string `json:"data"` // base64 of the encoded image
+	Tool   string `json:"tool"` // capture backend used (for diagnostics)
 }
 
 // FsPutParams writes Data (base64) to Path at byte Offset. Chunked uploads send
@@ -340,10 +342,10 @@ type FsPutParams struct {
 // FsPutResult reports the cumulative file size after this chunk landed, so the
 // console can verify the upload and drive a progress indicator.
 type FsPutResult struct {
-	OK      bool  `json:"ok"`
+	OK      bool   `json:"ok"`
 	Path    string `json:"path,omitempty"`
-	Written int   `json:"written"` // bytes written by this chunk
-	Size    int64 `json:"size"`    // total file size on disk after this chunk
+	Written int    `json:"written"` // bytes written by this chunk
+	Size    int64  `json:"size"`    // total file size on disk after this chunk
 }
 
 type FsRmParams struct {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { api, b64encode, b64decode } from "../api";
+import { api, getUser, b64encode, b64decode } from "../api";
 import { confirmDialog, alertDialog } from "./dialogs";
+import { loadRecent, saveRecent } from "../nodeWorkspace";
 
 // File browser for the FOCUSED node. Node is fixed by the workspace.
 // OS-aware:
@@ -8,14 +9,22 @@ import { confirmDialog, alertDialog } from "./dialogs";
 //    path box holds only the sub-path under the selected drive. Defaults to C:
 //    (or the first available drive) on open.
 //  - POSIX: a single path box rooted at "/".
-export function Files({ node, os }: { node: string; os: string }) {
+export function Files({ node, os, online }: { node: string; os: string; online: boolean }) {
+  const account = useRef(getUser()).current;
+  const onlineRef = useRef(online);
+  onlineRef.current = online;
+  useEffect(() => {
+    return () => { onlineRef.current = false; cancelRef.current = true; };
+  }, []);
   const win = os === "windows";
   const sep = win ? "\\" : "/";
+  const recent = loadRecent<{ drives: string[]; path: string; edit: string; entries: any[] }>(localStorage, account, node, "files");
 
-  const [drives, setDrives] = useState<string[]>([]); // windows: ["C:\\","D:\\"]
-  const [path, setPath] = useState(win ? "" : "/");    // current listing path (full)
-  const [edit, setEdit] = useState("");                // path box text (sub-path on win)
-  const [entries, setEntries] = useState<any[]>([]);
+  const [drives, setDrives] = useState<string[]>(recent?.data.drives || []); // windows: ["C:\","D:\"]
+  const [path, setPath] = useState(recent?.data.path ?? (win ? "" : "/")); // current listing path (full)
+  const [edit, setEdit] = useState(recent?.data.edit || "");               // path box text (sub-path on win)
+  const [entries, setEntries] = useState<any[]>(recent?.data.entries || []);
+  const [savedAt, setSavedAt] = useState(recent?.savedAt || 0);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   // upload progress: null = idle; otherwise live transfer state + a small log.
@@ -28,6 +37,7 @@ export function Files({ node, os }: { node: string; os: string }) {
   // aborts (the in-flight chunk finishes first, then we stop). A ref so the
   // running async loop sees the latest value without a re-render dependency.
   const cancelRef = useRef(false);
+  useEffect(() => { if (!online) cancelRef.current = true; }, [online]);
   const [uplog, setUplog] = useState<string[]>([]);
 
   // --- windows path helpers ---
@@ -52,37 +62,41 @@ export function Files({ node, os }: { node: string; os: string }) {
     return i <= 0 ? "/" : t.slice(0, i);
   };
 
-  const ls = async (p: string) => {
-    if (!node) return;
+  const ls = async (p: string, knownDrives = drives) => {
+    if (!node || !onlineRef.current) return;
     setBusy(true); setErr("");
     try {
       const v = await api.one(node, "fs.ls", { path: p });
-      setEntries((v.entries || []).sort((a: any, b: any) => (b.isDir ? 1 : 0) - (a.isDir ? 1 : 0)));
+      if (!onlineRef.current) return;
+      const next = (v.entries || []).sort((a: any, b: any) => (b.isDir ? 1 : 0) - (a.isDir ? 1 : 0));
       const np = v.path ?? p;
-      setPath(np);
-      setEdit(win ? subOf(np) : np);
+      const ne = win ? subOf(np) : np;
+      const now = Date.now();
+      setEntries(next); setPath(np); setEdit(ne); setSavedAt(now);
+      saveRecent(localStorage, account, node, "files", { drives: knownDrives, path: np, edit: ne, entries: next }, now);
     } catch (e) { setErr(String(e)); } finally { setBusy(false); }
   };
 
   // On node change: windows → fetch drive list, default to C: (or first);
   // posix → list "/".
   useEffect(() => {
-    if (!node) return;
+    if (!node || !online) return;
     if (win) {
       (async () => {
         // New agents list drive letters for an empty path; default to C: (or
         // the first available drive) and list it.
         const v = await api.one(node, "fs.ls", { path: "" });
+        if (!onlineRef.current) return;
         const ds: string[] = (v.entries || []).filter((e: any) => e.mode === "drive").map((e: any) => e.name);
         setDrives(ds);
         const def = ds.find((d) => /^c:/i.test(d)) || ds[0] || "C:\\";
-        ls(def);
+        ls(def, ds);
       })().catch((e) => setErr(String(e)));
     } else {
       ls("/");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node]);
+  }, [node, online]);
 
   // Compose the full path from the drive select (windows) + the edit box, then list.
   const go = () => {
@@ -96,8 +110,10 @@ export function Files({ node, os }: { node: string; os: string }) {
   };
 
   const download = async (name: string) => {
+    if (!onlineRef.current) return;
     try {
       const v = await api.one(node, "fs.get", { path: join(path, name) });
+      if (!onlineRef.current) return;
       const blob = new Blob([b64decode(v.data) as unknown as BlobPart]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = name; a.click();
@@ -106,8 +122,8 @@ export function Files({ node, os }: { node: string; os: string }) {
   };
 
   const remove = async (name: string, isDir: boolean) => {
-    if (!(await confirmDialog(`删除 ${join(path, name)} @ ${node}?`, { title: "删除文件", danger: true }))) return;
-    try { await api.one(node, "fs.rm", { path: join(path, name), recursive: isDir }); ls(path); }
+    if (!(await confirmDialog(`删除 ${join(path, name)} @ ${node}?`, { title: "删除文件", danger: true })) || !onlineRef.current) return;
+    try { await api.one(node, "fs.rm", { path: join(path, name), recursive: isDir }); if (onlineRef.current) ls(path); }
     catch (e) { alertDialog(String(e), { title: "删除失败" }); }
   };
 
@@ -116,6 +132,7 @@ export function Files({ node, os }: { node: string; os: string }) {
   // truncates, later chunks WriteAt their offset on the agent.
   const CHUNK = 512 * 1024; // 512 KiB per chunk (~683 KiB base64 on the wire)
   const upload = async (file: File) => {
+    if (!onlineRef.current) return;
     const dest = join(path, file.name);
     const total = file.size;
     const t0 = Date.now();
@@ -124,28 +141,32 @@ export function Files({ node, os }: { node: string; os: string }) {
     cancelRef.current = false;
     setUp({ name: file.name, sent: 0, total, done: false, failed: false, bps: 0 });
     log(`开始上传 ${file.name}（${fmtSize(total)}）→ ${dest}`);
+    const cancelUpload = (sent: number) => {
+      cancelRef.current = true;
+      setUp({ name: file.name, sent, total, done: false, failed: true, canceled: true, bps: 0 });
+      log(`已取消 ✗ 已传 ${fmtSize(sent)} / ${fmtSize(total)}（节点上为不完整文件）`);
+      if (onlineRef.current) ls(path);
+    };
     try {
       const buf = new Uint8Array(await file.arrayBuffer());
+      if (!onlineRef.current || cancelRef.current) { cancelUpload(0); return; }
       if (total === 0) {
         await api.one(node, "fs.put", { path: dest, data: "", offset: 0 });
+        if (!onlineRef.current || cancelRef.current) { cancelUpload(0); return; }
       }
       for (let off = 0; off < total; off += CHUNK) {
-        if (cancelRef.current) {
-          const sent = off;
-          setUp({ name: file.name, sent, total, done: false, failed: true, canceled: true, bps: 0 });
-          log(`已取消 ✗ 已传 ${fmtSize(sent)} / ${fmtSize(total)}（节点上为不完整文件）`);
-          ls(path);
-          return;
-        }
+        if (cancelRef.current || !onlineRef.current) { cancelUpload(off); return; }
         const slice = buf.subarray(off, Math.min(off + CHUNK, total));
         const res: any = await api.one(node, "fs.put", { path: dest, data: b64encode(slice), offset: off });
         const sent = Math.min(off + slice.length, total);
+        if (!onlineRef.current || cancelRef.current) { cancelUpload(sent); return; }
         const elapsed = Math.max(0.001, (Date.now() - t0) / 1000);
         const bps = sent / elapsed;
         setUp({ name: file.name, sent, total, done: false, failed: false, bps });
         const pct = total ? Math.floor((sent / total) * 100) : 100;
         log(`分片 @${fmtSize(off)} 写入 ${fmtSize(slice.length)}（${pct}%${res?.size != null ? `，节点 ${fmtSize(res.size)}` : ""}）`);
       }
+      if (!onlineRef.current || cancelRef.current) { cancelUpload(total); return; }
       const elapsed = Math.max(0.001, (Date.now() - t0) / 1000);
       setUp({ name: file.name, sent: total, total, done: true, failed: false, bps: total / elapsed });
       log(`完成 ✓ 共 ${fmtSize(total)} · 用时 ${elapsed.toFixed(1)}s · 均速 ${fmtSize(total / elapsed)}/s`);
@@ -167,19 +188,19 @@ export function Files({ node, os }: { node: string; os: string }) {
       <div className="flex gap-2 items-center flex-wrap">
         {win && (
           <select className="input" style={{ width: 92, flexShrink: 0 }} value={driveOf(path)}
-            disabled={busy} onChange={(e) => ls(e.target.value)} title="盘符">
+            disabled={busy || !online} onChange={(e) => ls(e.target.value)} title="盘符">
             {drives.length === 0 && <option value={driveOf(path)}>{driveOf(path) || "C:\\"}</option>}
             {drives.map((d) => <option key={d} value={d}>{d}</option>)}
           </select>
         )}
-        <input className="input" style={{ flex: 1, minWidth: 160 }} value={edit}
+        <input className="input" style={{ flex: 1, minWidth: 160 }} value={edit} disabled={!online}
           placeholder={win ? "盘内路径，如 Users\\Public" : "/"}
           onChange={(e) => setEdit(e.target.value)} onKeyDown={(e) => e.key === "Enter" && go()} />
-        <button className="btn" onClick={go} disabled={busy}>转到</button>
-        <button className="btn" onClick={() => ls(parent(path))} disabled={busy || atRoot}>↑ 上级</button>
-        <label className="btn btn-accent" style={{ cursor: up && !up.done && !up.failed ? "not-allowed" : "pointer", opacity: up && !up.done && !up.failed ? 0.6 : 1 }}>
+        <button className="btn" onClick={go} disabled={busy || !online}>转到</button>
+        <button className="btn" onClick={() => ls(parent(path))} disabled={busy || atRoot || !online}>↑ 上级</button>
+        <label className="btn btn-accent" style={{ cursor: !online || (up && !up.done && !up.failed) ? "not-allowed" : "pointer", opacity: !online || (up && !up.done && !up.failed) ? 0.6 : 1 }}>
           {up && !up.done && !up.failed ? `上传中 ${up.total ? Math.floor((up.sent / up.total) * 100) : 0}%` : "上传"}
-          <input type="file" style={{ display: "none" }} disabled={!!up && !up.done && !up.failed}
+          <input type="file" style={{ display: "none" }} disabled={!online || (!!up && !up.done && !up.failed)}
             onChange={(e) => { if (e.target.files?.[0]) upload(e.target.files[0]); e.target.value = ""; }} />
         </label>
       </div>
@@ -216,21 +237,23 @@ export function Files({ node, os }: { node: string; os: string }) {
           )}
         </div>
       )}
-      <div className="mono-sm" style={{ color: "var(--muted)" }}>{path || (win ? "盘符" : "/")}</div>
+      <div className="mono-sm" style={{ color: "var(--muted)" }}>
+        {path || (win ? "盘符" : "/")}{!online && (savedAt ? ` · 记录于 ${new Date(savedAt).toLocaleString()}` : " · 暂无历史数据")}
+      </div>
       {err && <div style={{ color: "var(--danger)" }}>{err}</div>}
       <div className="panel flex-1 overflow-auto">
         {entries.map((e) => (
           <div key={e.name} className="flex items-center gap-2 px-3 py-1.5" style={{ borderBottom: "1px solid var(--border)" }}>
             <span style={{ width: 16 }}>{e.isDir ? "📁" : "📄"}</span>
             <span className={e.isDir ? "cursor-pointer" : ""} style={{ color: e.isDir ? "var(--accent)" : "var(--fg)", flex: 1 }}
-              onClick={() => e.isDir && ls(join(path, e.name))}>{e.name}</span>
+              onClick={() => online && e.isDir && ls(join(path, e.name))}>{e.name}</span>
             <span className="mono-sm" style={{ width: 90, textAlign: "right" }}>{e.isDir ? "" : fmtSize(e.size)}</span>
             <span className="mono-sm" style={{ width: 110 }}>{e.mode}</span>
-            {!e.isDir && <button className="btn" style={{ padding: "1px 7px" }} onClick={() => download(e.name)}>下载</button>}
-            <button className="btn" style={{ padding: "1px 7px", color: "var(--danger)" }} onClick={() => remove(e.name, e.isDir)}>删</button>
+            {!e.isDir && <button className="btn" style={{ padding: "1px 7px" }} disabled={!online} onClick={() => download(e.name)}>下载</button>}
+            <button className="btn" style={{ padding: "1px 7px", color: "var(--danger)" }} disabled={!online} onClick={() => remove(e.name, e.isDir)}>删</button>
           </div>
         ))}
-        {entries.length === 0 && <div className="mono-sm px-3 py-4">空目录或未加载</div>}
+        {entries.length === 0 && <div className="mono-sm px-3 py-4">{online ? "空目录或未加载" : "暂无历史数据"}</div>}
       </div>
     </div>
   );

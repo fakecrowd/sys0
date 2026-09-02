@@ -1,6 +1,7 @@
 // REST client for the sys0-hub API.
 
-import type { RescueProgress } from "./rescueProgress";
+import type { RescueProgress } from "./rescueProgress.ts";
+import { clearRecent, migrateLegacyScreenshotHistory } from "./nodeWorkspace.ts";
 
 export type RescueCommand = {
   id: string;
@@ -80,11 +81,13 @@ export const getToken = () => localStorage.getItem(TOKEN_KEY);
 export const getRole = () => localStorage.getItem(ROLE_KEY) || "member";
 export const getUser = () => localStorage.getItem(USER_KEY) || "";
 export function setSession(t: string, role: string, username?: string) {
+  if (username !== undefined) localStorage.setItem(USER_KEY, username);
   localStorage.setItem(TOKEN_KEY, t);
   localStorage.setItem(ROLE_KEY, role);
-  if (username !== undefined) localStorage.setItem(USER_KEY, username);
+  migrateLegacyScreenshotHistory(localStorage, getUser());
 }
 export function clearSession() {
+  clearRecent(localStorage);
   localStorage.removeItem(TOKEN_KEY);
   localStorage.removeItem(ROLE_KEY);
   localStorage.removeItem(USER_KEY);

@@ -35,6 +35,7 @@ type managedTask struct {
 	finished int64
 	pty      pty.Pty
 	buf      []byte // ring buffer of recent output
+	seq      uint64 // monotonic output chunk sequence; survives restart
 }
 
 func (t *managedTask) info() wire.TaskInfo {
@@ -46,13 +47,22 @@ func (t *managedTask) info() wire.TaskInfo {
 	}
 }
 
-func (t *managedTask) append(b []byte) {
+func (t *managedTask) append(b []byte) uint64 {
 	t.mu.Lock()
 	t.buf = append(t.buf, b...)
 	if len(t.buf) > taskBufferCap {
 		t.buf = t.buf[len(t.buf)-taskBufferCap:]
 	}
+	t.seq++
+	seq := t.seq
 	t.mu.Unlock()
+	return seq
+}
+
+func (t *managedTask) snapshot() ([]byte, uint64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]byte(nil), t.buf...), t.seq
 }
 
 type taskManager struct {
@@ -124,10 +134,8 @@ func (a *Agent) launchTask(t *managedTask) *rpc.Error {
 	t.pty = ptmx
 	t.mu.Unlock()
 
-	a.mu.Lock()
-	peer := a.peer
-	a.mu.Unlock()
 	emit := func(m map[string]any) {
+		peer := a.currentPeer()
 		if peer == nil {
 			return
 		}
@@ -141,8 +149,8 @@ func (a *Agent) launchTask(t *managedTask) *rpc.Error {
 		for {
 			n, err := ptmx.Read(buf)
 			if n > 0 {
-				t.append(buf[:n])
-				emit(map[string]any{"chunk": base64.StdEncoding.EncodeToString(buf[:n])})
+				seq := t.append(buf[:n])
+				emit(map[string]any{"chunk": base64.StdEncoding.EncodeToString(buf[:n]), "seq": seq})
 			}
 			if err != nil {
 				return
@@ -242,11 +250,11 @@ func (a *Agent) doTaskOutput(params json.RawMessage) (any, *rpc.Error) {
 	if t == nil {
 		return nil, rpc.Errorf(rpc.CodeBadParams, "no such task")
 	}
+	buf, seq := t.snapshot()
 	t.mu.Lock()
-	data := base64.StdEncoding.EncodeToString(t.buf)
 	state, exit := t.state, t.exit
 	t.mu.Unlock()
-	return wire.TaskOutputResult{Task: t.id, Data: data, State: state, Exit: exit}, nil
+	return wire.TaskOutputResult{Task: t.id, Data: base64.StdEncoding.EncodeToString(buf), Seq: seq, State: state, Exit: exit}, nil
 }
 
 func (a *Agent) doTaskRestart(params json.RawMessage) (any, *rpc.Error) {

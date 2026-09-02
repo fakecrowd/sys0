@@ -17,6 +17,7 @@ import { DOWNLOAD_PATH } from "./downloadNav";
 import { progressSummary } from "./rescueProgress";
 import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
 import { WindowManager, type WinApp } from "./WindowManager";
+import { canFocusNode, clearRecent, migrateLegacyScreenshotHistory } from "./nodeWorkspace";
 
 export function App() {
   // Public agent-download page (works logged-out). No hooks above this gate
@@ -31,6 +32,19 @@ function AppRoot() {
   const [authed, setAuthed] = useState(!!getToken());
   const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
 
+  useEffect(() => { if (authed) migrateLegacyScreenshotHistory(localStorage, getUser()); }, [authed]);
+
+  useEffect(() => {
+    if (!authed) return;
+    const account = getUser();
+    const handleSessionChange = (event: StorageEvent) => {
+      if ((event.key === "sys0_user" && event.newValue !== account) ||
+          (event.key === "sys0_token" && !event.newValue)) location.reload();
+    };
+    window.addEventListener("storage", handleSessionChange);
+    return () => window.removeEventListener("storage", handleSessionChange);
+  }, [authed]);
+
   useEffect(() => {
     if (authed) return;
     api.setupStatus().then((r) => setNeedsSetup(r.ok ? r.needsSetup : false)).catch(() => setNeedsSetup(false));
@@ -38,7 +52,7 @@ function AppRoot() {
 
   let body: React.ReactNode;
   if (authed) {
-    body = <Console onLogout={() => { clearSession(); setAuthed(false); }} />;
+    body = <Console onLogout={() => { clearRecent(localStorage); clearSession(); setAuthed(false); }} />;
   } else if (needsSetup === null) {
     body = <div className="h-full flex items-center justify-center mono-sm">…</div>;
   } else if (needsSetup) {
@@ -136,17 +150,18 @@ function Console({ onLogout }: { onLogout: () => void }) {
   };
 
   const focusedNode = nodes.find((n) => n.id === focused);
+  const focusedOnline = focusedNode?.state === "online";
 
   // Every console surface is a window bound to the FOCUSED node — no in-window
   // node picker, no batch targeting. Admin-only surfaces append conditionally.
   const apps: WinApp[] = focused ? [
-    { key: "shell", title: "Shell", render: () => <Shell node={focused} /> },
-    { key: "tasks", title: "任务", render: () => <Tasks node={focused} /> },
-    { key: "proc", title: "进程", render: () => <Processes node={focused} /> },
-    { key: "files", title: "文件", render: () => <Files node={focused} os={focusedNode?.host.os || ""} /> },
-    { key: "monitor", title: "监控", render: () => <Monitor node={focused} live={live} /> },
-    { key: "screenshot", title: "截屏", render: () => <Screenshot node={focused} /> },
-    { key: "actions", title: "动作", render: () => <Actions node={focused} /> },
+    { key: "shell", title: "Shell", render: () => <Shell node={focused} online={focusedOnline} /> },
+    { key: "tasks", title: "任务", render: () => <Tasks node={focused} online={focusedOnline} /> },
+    { key: "proc", title: "进程", render: () => <Processes node={focused} online={focusedOnline} /> },
+    { key: "files", title: "文件", render: () => <Files node={focused} os={focusedNode?.host.os || ""} online={focusedOnline} /> },
+    { key: "monitor", title: "监控", render: () => <Monitor node={focused} live={live} online={focusedOnline} /> },
+    { key: "screenshot", title: "截屏", render: () => <Screenshot node={focused} online={focusedOnline} /> },
+    { key: "actions", title: "动作", render: () => <Actions node={focused} online={focusedOnline} /> },
     { key: "audit", title: "审计", render: () => <Audit /> },
   ] : [];
 
@@ -180,7 +195,14 @@ function Console({ onLogout }: { onLogout: () => void }) {
         </div>
         <main className="flex-1 flex flex-col min-w-0">
           {focused
-            ? <WindowManager key={focused} workspaceKey={focused} apps={apps} />
+            ? <>
+                {!focusedOnline && (
+                  <div className="mono-sm px-3 py-2" style={{ color: "var(--warn)", borderBottom: "1px solid var(--border)" }}>
+                    节点离线 · 显示最近保存的信息
+                  </div>
+                )}
+                <WindowManager key={focused} workspaceKey={focused} apps={apps} />
+              </>
             : <div className="flex-1 flex items-center justify-center px-6" style={{ color: "var(--muted)" }}>
                 <div style={{ textAlign: "center", lineHeight: 1.7 }}>
                   <div className="text-lg" style={{ color: "var(--fg)", opacity: 0.8 }}>请选择节点</div>
@@ -258,13 +280,20 @@ function NodeList({
         </button>
       </div>
       <div className="flex-1 overflow-auto p-2 space-y-2">
-        {ordered.length === 0 && <div className="mono-sm px-2 py-4">无在线节点</div>}
+        {ordered.length === 0 && <div className="mono-sm px-2 py-4">暂无节点</div>}
         {ordered.map((n) => (
           <NodeCard key={n.id} n={n} on={focused === n.id} onSelect={onSelect} m={live[n.id]} onChanged={onRefresh} />
         ))}
       </div>
     </aside>
   );
+}
+
+function nodeConnectionSignature(node: Node): string {
+  return JSON.stringify([
+    node.state, node.lastSeen, node.agentPid || 0,
+    (node.modules || []).map((module) => [module.name, module.online, module.version || ""]),
+  ]);
 }
 
 function NodeCard({
@@ -275,8 +304,15 @@ function NodeCard({
   const [rescueOpen, setRescueOpen] = useState(n.state === "bootstrapping");
 
   const act = async (label: string, danger: boolean, fn: () => Promise<any>) => {
+    const expectedConnection = nodeConnectionSignature(n);
     if (!(await confirmDialog(`${label} @ ${n.label}（${n.id}）?`, { title: label, danger }))) return;
-    try { await fn(); onChanged(); } catch (e) { alertDialog(String(e), { title: "操作失败" }); }
+    try {
+      const latest = await api.nodes();
+      const current = latest.ok ? latest.nodes.find((node) => node.id === n.id) : undefined;
+      if (!current || current.state !== "online" || nodeConnectionSignature(current) !== expectedConnection) return;
+      await fn();
+      onChanged();
+    } catch (e) { alertDialog(String(e), { title: "操作失败" }); }
   };
   const rename = async () => {
     const v = await promptDialog("重命名节点", n.label, "新别名");
@@ -301,12 +337,12 @@ function NodeCard({
 
   const offline = n.state === "offline";
   const bootstrapping = n.state === "bootstrapping";
-  const selectable = !offline && !bootstrapping;
+  const selectable = canFocusNode(n.state);
 
   return (
     <div className={selectable ? "panel p-2.5 cursor-pointer" : "panel p-2.5"}
       onClick={() => selectable && onSelect(n.id)}
-      style={{ ...(on ? { borderColor: "var(--accent)" } : {}), ...(offline ? { opacity: 0.55 } : {}) }}>
+      style={{ ...(on ? { borderColor: "var(--accent)" } : {}), ...(offline ? { opacity: 0.7 } : {}) }}>
       <div className="flex items-center gap-2">
         <span className="dot" style={{ background: offline ? "var(--muted)" : bootstrapping ? "var(--warn)" : "var(--accent)" }} />
         <span style={{ color: on ? "var(--accent)" : "var(--fg)" }}>{n.label}</span>
