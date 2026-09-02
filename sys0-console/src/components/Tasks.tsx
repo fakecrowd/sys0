@@ -174,7 +174,7 @@ export function Tasks({ node }: { node: string }) {
           onMouseDown={() => term.current?.focus()}>
           <div ref={termHost} style={{ height: "100%", width: "100%" }} />
         </div>
-        <div className="mono-sm">点击上方终端可直接交互（stdin 透传到进程，支持 ANSI / TUI）</div>
+        <div className="mono-sm">点击终端即可交互，支持 ANSI / TUI</div>
       </div>
     </div>
   );

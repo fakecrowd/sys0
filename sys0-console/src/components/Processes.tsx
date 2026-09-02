@@ -69,7 +69,7 @@ export function Processes({ node }: { node: string }) {
                 <td className="px-3 py-1 mono-sm">{(p.rss / 1e6).toFixed(1)}M</td>
                 <td className="px-3 py-1" style={{ color: p.self ? "var(--accent)" : "var(--accent-2)" }}>
                   {p.name}
-                  {p.self && <span className="tag ml-1" style={{ color: "var(--accent)", borderColor: "var(--accent)" }} title="这是 sys0-agent 本体（已伪装进程名）">agent</span>}
+                  {p.self && <span className="tag ml-1" style={{ color: "var(--accent)", borderColor: "var(--accent)" }} title="当前 sys0 agent 进程">agent</span>}
                 </td>
                 <td className="px-3 py-1">
                   <button className="btn" style={{ padding: "1px 6px" }} onClick={() => kill(p.pid, p.name, "TERM")}>TERM</button>{" "}

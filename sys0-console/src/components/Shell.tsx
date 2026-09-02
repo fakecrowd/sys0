@@ -183,7 +183,7 @@ export function Shell({ node }: { node: string }) {
   return (
     <div className="flex flex-col gap-2 h-full">
       <div className="flex gap-2 items-center flex-wrap">
-        <span className="mono-sm">交互 Shell（agent 侧常驻 · 可复用/多开）·</span>
+        <span className="mono-sm">交互 Shell ·</span>
         {!connected
           ? <button className="btn btn-accent" disabled={!node} onClick={connect}>连接</button>
           : <button className="btn" style={{ color: "var(--danger)" }} onClick={disconnect}>断开（保留会话）</button>}

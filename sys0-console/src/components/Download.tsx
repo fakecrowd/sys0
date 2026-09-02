@@ -98,14 +98,14 @@ export function Download() {
             ))}
 
             <div className="panel p-4 mt-6 mono-sm" style={{ lineHeight: 1.7 }}>
-              <div style={{ color: "var(--accent)", marginBottom: 6 }}>开箱即用 · zero-config</div>
+              <div style={{ color: "var(--accent)", marginBottom: 6 }}>快速开始</div>
               <div style={{ opacity: 0.85 }}>
-                下载后直接<strong>双击运行</strong>即可——已内置本环境地址，自动以 wss 安全连接到{" "}
-                <code>{location.host}</code>。无需任何参数。
+                下载后直接<strong>运行</strong>即可，客户端会自动连接到{" "}
+                <code>{location.host}</code>。
               </div>
               <div style={{ opacity: 0.85, marginTop: 6 }}>
-                Just download &amp; run — the hosted hub address is baked in; it connects to{" "}
-                <code>{location.host}</code> over wss automatically. No flags needed.
+                Download and run the client to connect to{" "}
+                <code>{location.host}</code>.
                 <br />
                 <span style={{ opacity: 0.65 }}>
                   (macOS/Linux 命令行需先 <code>chmod +x</code>；如遇 Gatekeeper 拦截可右键打开。)

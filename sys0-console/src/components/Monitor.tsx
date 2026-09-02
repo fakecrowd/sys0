@@ -53,7 +53,7 @@ export function Monitor({ node, live }: { node: string; live: Record<string, any
     });
   }, [m]);
 
-  if (!node) return <div className="mono-sm">无聚焦节点</div>;
+  if (!node) return <div className="mono-sm">未选择节点</div>;
 
   const cores: number[] = m?.cpuCores || [];
   const memUsedG = m ? (m.memUsed / 1e9).toFixed(2) : "0";

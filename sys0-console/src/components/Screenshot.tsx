@@ -185,7 +185,7 @@ export function Screenshot({ node }: { node: string }) {
 
       {sel && (
         <div className="mono-sm flex flex-wrap items-center gap-2" style={{ color: "var(--muted)" }}>
-          <span>{new Date(sel.ts).toLocaleString()} · {sel.width}×{sel.height} · {sel.format.toUpperCase()} · {kb} KB · 后端 {sel.tool}</span>
+          <span>{new Date(sel.ts).toLocaleString()} · {sel.width}×{sel.height} · {sel.format.toUpperCase()} · {kb} KB</span>
           <a className="btn" style={{ padding: "2px 8px" }}
             href={url} download={`sys0-${node}-${sel.ts}.${sel.format === "jpeg" ? "jpg" : "png"}`}>下载</a>
           <a className="btn" style={{ padding: "2px 8px" }} href={url} target="_blank" rel="noreferrer">新窗口打开</a>

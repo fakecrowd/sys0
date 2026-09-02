@@ -162,10 +162,10 @@ function Console({ onLogout }: { onLogout: () => void }) {
         </div>
         <div className="flex items-center gap-3 min-w-0">
           <span className="mono-sm truncate">
-            {nodes.filter((n) => n.state === "online").length} online · {focusedNode ? `▸ ${focusedNode.label}` : "未聚焦"}
+            {nodes.filter((n) => n.state === "online").length} online · {focusedNode ? `▸ ${focusedNode.label}` : "未选择"}
           </span>
           <a className="btn" href={DOWNLOAD_PATH}>下载</a>
-          <button className="btn" title="hub 缓存的 agent/rescue release 版本与强制更新" onClick={() => setCacheOpen(true)}>镜像</button>
+          <button className="btn" title="查看镜像版本与更新缓存" onClick={() => setCacheOpen(true)}>镜像</button>
           <button className="btn" title="账户" onClick={() => setAcctOpen(true)}>
             <span className="dot" style={{ background: "var(--accent)" }} /> {getUser() || getRole()}
           </button>
@@ -183,9 +183,8 @@ function Console({ onLogout }: { onLogout: () => void }) {
             ? <WindowManager key={focused} workspaceKey={focused} apps={apps} />
             : <div className="flex-1 flex items-center justify-center px-6" style={{ color: "var(--muted)" }}>
                 <div style={{ textAlign: "center", lineHeight: 1.7 }}>
-                  <div className="text-lg" style={{ color: "var(--fg)", opacity: 0.8 }}>未聚焦任何节点</div>
-                  <div className="mono-sm mt-1">在左侧选择一个节点，打开它的专属工作区</div>
-                  <div className="mono-sm mt-1" style={{ opacity: 0.6 }}>窗口布局、位置、大小与内容均与该节点绑定</div>
+                  <div className="text-lg" style={{ color: "var(--fg)", opacity: 0.8 }}>请选择节点</div>
+                  <div className="mono-sm mt-1">从左侧节点列表开始操作</div>
                 </div>
               </div>}
         </main>
@@ -244,7 +243,7 @@ function NodeList({
   return (
     <aside className="w-full h-full flex flex-col" style={{ borderRight: "1px solid var(--border)" }}>
       <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
-        <span className="mono-sm">NODES · 聚焦工作区</span>
+        <span className="mono-sm">节点 / NODES</span>
         <button className="btn" onClick={onRefresh}>↻</button>
       </div>
       <div className="flex items-center gap-2 px-3 py-2" style={{ borderBottom: "1px solid var(--border)" }}>
@@ -311,7 +310,7 @@ function NodeCard({
       <div className="flex items-center gap-2">
         <span className="dot" style={{ background: offline ? "var(--muted)" : bootstrapping ? "var(--warn)" : "var(--accent)" }} />
         <span style={{ color: on ? "var(--accent)" : "var(--fg)" }}>{n.label}</span>
-        {on && <span className="tag" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>聚焦</span>}
+        {on && <span className="tag" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>当前</span>}
         {offline && <span className="tag" style={{ color: "var(--muted)" }}>offline</span>}
         {bootstrapping && <span className="tag" style={{ color: "var(--warn)", borderColor: "var(--warn)" }}>引导中</span>}
         {n.rescue && (
