@@ -28,6 +28,7 @@ const builtin = @import("builtin");
 const install = @import("install.zig");
 const install_policy = @import("install_policy.zig");
 const progress_policy = @import("progress_policy.zig");
+const module_command_policy = @import("module_command_policy.zig");
 
 const Io = std.Io;
 
@@ -502,7 +503,6 @@ fn findStringField(s_: []const u8, name: []const u8) ?FieldHit {
     if (i >= s_.len) return null;
     return FieldHit{ .value = s_[vstart..i], .end = i + 1 };
 }
-
 
 // ---- logging --------------------------------------------------------------
 // On normal (console) builds we log to stderr. On Windows GUI-subsystem builds
@@ -989,7 +989,6 @@ fn buildResultsJson(buf: []u8, results: []const CmdResult) []const u8 {
     return w.buffered();
 }
 
-
 // g_child shares the currently-running agent child with the command watcher so
 // a manual update/restart can interrupt the supervise loop's blocking wait by
 // killing the child. Guarded by g_child_mu.
@@ -1036,7 +1035,7 @@ fn agentOnlineState(io: Io) OnlineState {
 // supervisor relaunches only ITS module when the hub shows it offline. This is
 // the AV-isolation payoff: quarantining one module's binary relaunches just
 // that one, the rest keep running.
-const module_names = [_][]const u8{ "core", "shell", "fs", "screen" };
+const module_names = module_command_policy.module_names;
 var g_mod_online: [module_names.len]bool = .{false} ** module_names.len;
 var g_mod_seen: bool = false; // false until the first modulesOnline answer
 // g_mod_child_alive[idx] is true while a module child WE spawned is running
@@ -1045,6 +1044,12 @@ var g_mod_seen: bool = false; // false until the first modulesOnline answer
 // won't respawn a live child (which would just lose the single-instance lock).
 // Guarded by g_child_mu (shared with the uninstall/kill machinery).
 var g_mod_child_alive: [module_names.len]bool = .{false} ** module_names.len;
+// Child pointers let operator commands stop rescue-owned modular processes after
+// the Hub has asked every live peer to exit. The reaper remains the sole waiter.
+var g_mod_children: [module_names.len]?*std.process.Child = .{null} ** module_names.len;
+// Pending restart/update work is consumed by each module supervisor only after
+// both its child and Hub peer are offline. This closes the enqueue/report race.
+var g_mod_commands: module_command_policy.State = .{};
 
 fn moduleIndex(name: []const u8) ?usize {
     for (module_names, 0..) |m, i| {
@@ -1153,19 +1158,31 @@ fn commandWatcher(io: Io, gpa: std.mem.Allocator, cfg: Config, env: *std.process
             const c = batch[i];
             switch (c.kind) {
                 .update_agent => {
-                    g_child_mu.lockUncancelable(io);
-                    g_force_update = true;
-                    g_child_mu.unlock(io);
                     traceLine(io, "executing command update-agent (id {s})", .{c.id()});
-                    const had = killCurrentChild(io);
-                    traceLine(io, "command update-agent done (id {s}): killed pid {d}, will re-download", .{ c.id(), had });
-                    pushCmdResult(io, c.id(), "done", "agent update triggered (re-download + restart)");
+                    if (isModularConfig(cfg.modules)) {
+                        const result = queueAndKillModules(io, cfg.modules, .update);
+                        traceLine(io, "command update-agent queued {d} module(s), stopped {d} child(ren)", .{ result.queued, result.killed });
+                        pushCmdResult(io, c.id(), "done", "module update queued (re-download + restart)");
+                    } else {
+                        g_child_mu.lockUncancelable(io);
+                        g_force_update = true;
+                        g_child_mu.unlock(io);
+                        const had = killCurrentChild(io);
+                        traceLine(io, "command update-agent done (id {s}): killed pid {d}, will re-download", .{ c.id(), had });
+                        pushCmdResult(io, c.id(), "done", "agent update triggered (re-download + restart)");
+                    }
                 },
                 .restart_agent => {
                     traceLine(io, "executing command restart-agent (id {s})", .{c.id()});
-                    const had = killCurrentChild(io);
-                    traceLine(io, "command restart-agent done (id {s}): killed pid {d}, will restart", .{ c.id(), had });
-                    pushCmdResult(io, c.id(), "done", "agent restart triggered");
+                    if (isModularConfig(cfg.modules)) {
+                        const result = queueAndKillModules(io, cfg.modules, .restart);
+                        traceLine(io, "command restart-agent queued {d} module(s), stopped {d} child(ren)", .{ result.queued, result.killed });
+                        pushCmdResult(io, c.id(), "done", "module restart queued");
+                    } else {
+                        const had = killCurrentChild(io);
+                        traceLine(io, "command restart-agent done (id {s}): killed pid {d}, will restart", .{ c.id(), had });
+                        pushCmdResult(io, c.id(), "done", "agent restart triggered");
+                    }
                 },
                 .uninstall => {
                     traceLine(io, "executing command uninstall (id {s})", .{c.id()});
@@ -1257,6 +1274,28 @@ fn deleteInDir(io: Io, cwd: Io.Dir, dir: []const u8, name: []const u8) bool {
     const path = std.fmt.bufPrint(&path_buf, "{s}{c}{s}", .{ dir, sep, name }) catch return false;
     cwd.deleteFile(io, path) catch return false;
     return true;
+}
+
+const ModuleCommandResult = struct { queued: usize, killed: usize };
+
+fn isModularConfig(modules: []const u8) bool {
+    const trimmed = std.mem.trim(u8, modules, " \t");
+    return trimmed.len > 0 and !std.mem.eql(u8, trimmed, "all");
+}
+
+fn queueAndKillModules(io: Io, modules: []const u8, command: module_command_policy.Command) ModuleCommandResult {
+    g_child_mu.lockUncancelable(io);
+    defer g_child_mu.unlock(io);
+    const queued = g_mod_commands.queueConfigured(modules, command);
+    var killed: usize = 0;
+    for (g_mod_children, 0..) |child, idx| {
+        if (g_mod_commands.peek(idx) == .none) continue;
+        if (child) |ptr| {
+            ptr.kill(io);
+            killed += 1;
+        }
+    }
+    return .{ .queued = queued, .killed = killed };
 }
 
 fn killCurrentChild(io: Io) i64 {
@@ -1419,19 +1458,25 @@ fn downloadModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, 
         defer f.close(io);
         f.setPermissions(io, .fromMode(0o755)) catch {};
     }
-    try cwd.rename(tmp_path, cwd, dest_path, io);
-    if (!agentLooksValid(io, dest_path)) {
+    if (!agentLooksValid(io, tmp_path)) {
         logLine("module {s} failed validity check", .{mod});
+        cwd.deleteFile(io, tmp_path) catch {};
         return error.DownloadInvalid;
     }
+    // Atomic publish keeps the known-good canonical intact until the complete,
+    // validated replacement is closed and ready.
+    try cwd.rename(tmp_path, cwd, dest_path, io);
     download_ok = true;
     logLine("module {s} installed: {s}", .{ mod, dest_path });
 }
 
-fn ensureModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, dest_path: []const u8) !void {
-    if (agentLooksValid(io, dest_path)) return;
+fn installModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, dest_path: []const u8, force: bool) !void {
+    if (!force and agentLooksValid(io, dest_path)) return;
     var attempt: u8 = 0;
     while (attempt < 3) : (attempt += 1) {
+        // downloadModule writes and closes a sibling .tmp before atomically
+        // renaming it over the canonical binary. A failed fetch leaves the known
+        // good canonical in place for rollback instead of deleting it first.
         downloadModule(gpa, io, cfg, mod, dest_path) catch {
             sleepMs(io, 2000);
             continue;
@@ -1439,6 +1484,10 @@ fn ensureModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, de
         return;
     }
     return error.ModuleUnavailable;
+}
+
+fn ensureModule(gpa: std.mem.Allocator, io: Io, cfg: Config, mod: []const u8, dest_path: []const u8) !void {
+    return installModule(gpa, io, cfg, mod, dest_path, false);
 }
 
 // ModuleSup is the per-module supervisor state passed to a detached worker.
@@ -1476,6 +1525,7 @@ fn superviseModule(sup: ModuleSup) void {
         g_child_mu.lockUncancelable(io);
         const uninstalling = g_uninstall;
         const child_alive = g_mod_child_alive[sup.idx];
+        const pending_command = g_mod_commands.peek(sup.idx);
         g_child_mu.unlock(io);
         if (uninstalling) {
             traceLine(io, "module {s}: supervisor stopping (uninstall)", .{mod});
@@ -1489,6 +1539,14 @@ fn superviseModule(sup: ModuleSup) void {
         if (spawn_ts) |ts| {
             const elapsed: u64 = @intCast(@max(0, ts.durationTo(Io.Timestamp.now(io, .awake)).toMilliseconds()));
             if (elapsed >= cfg.connect_grace_ms) spawn_ts = null else in_grace = true;
+        }
+
+        // Operator restart/update waits until both the rescue-owned child and
+        // Hub peer are gone. A forced update downloads to a sibling temporary
+        // file and atomically replaces the canonical only after the fetch closes.
+        if (pending_command != .none and (child_alive or st.online)) {
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
         }
 
         // CASE A: hub says this module is connected -> stand by.
@@ -1509,13 +1567,12 @@ fn superviseModule(sup: ModuleSup) void {
             gpa.free(d);
             prev_decoy = null;
         }
-        ensureModule(gpa, io, cfg, mod, bin_path) catch |err| {
+        installModule(gpa, io, cfg, mod, bin_path, pending_command == .update) catch |err| {
             traceLine(io, "module {s}: download failed: {s}; retry {d}ms", .{ mod, @errorName(err), backoff });
             sleepMs(io, backoff);
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
             continue;
         };
-
         // Decoy copy: <module>-suffixed neutral name so it's not obviously sys0,
         // and distinct per module so several can coexist in a process list.
         const decoy = prepareModuleDecoy(gpa, io, cfg.data_dir, bin_path, sup.fingerprint, mod);
@@ -1524,6 +1581,38 @@ fn superviseModule(sup: ModuleSup) void {
         const disguise = std.fs.path.basename(spawn_path);
         traceLine(io, "module {s}: starting as {s}", .{ mod, disguise });
 
+        // Allocate child storage before entering the command/child critical
+        // section. If allocation fails, no process has been started.
+        const cptr = gpa.create(std.process.Child) catch {
+            if (prev_decoy) |d| {
+                Io.Dir.cwd().deleteFile(io, d) catch {};
+                gpa.free(d);
+                prev_decoy = null;
+            }
+            sleepMs(io, cfg.check_interval_s * 1000);
+            continue;
+        };
+
+        // Serialize the final command check, spawn, and child publication with
+        // queueAndKillModules. A command arriving in this window therefore sees
+        // either no spawn at all or a published child pointer it can terminate.
+        g_child_mu.lockUncancelable(io);
+        const current_command = g_mod_commands.peek(sup.idx);
+        const command_matches = if (pending_command == .none)
+            current_command == .none
+        else
+            current_command == pending_command;
+        if (g_uninstall or g_mod_child_alive[sup.idx] or !command_matches) {
+            g_child_mu.unlock(io);
+            gpa.destroy(cptr);
+            if (prev_decoy) |d| {
+                Io.Dir.cwd().deleteFile(io, d) catch {};
+                gpa.free(d);
+                prev_decoy = null;
+            }
+            continue;
+        }
+
         const start_ts = Io.Timestamp.now(io, .awake);
         const spawned = std.process.spawn(io, .{
             .argv = &.{ spawn_path, "--data-dir", cfg.data_dir },
@@ -1531,6 +1620,8 @@ fn superviseModule(sup: ModuleSup) void {
             .stdout = .inherit,
             .stderr = .inherit,
         }) catch |err| {
+            g_child_mu.unlock(io);
+            gpa.destroy(cptr);
             traceLine(io, "module {s}: spawn failed: {s}", .{ mod, @errorName(err) });
             // Drop the decoy (may be transiently busy) but KEEP the canonical
             // module binary — deleting it forces a needless re-download and can
@@ -1544,18 +1635,19 @@ fn superviseModule(sup: ModuleSup) void {
             backoff = @min(backoff * 2, cfg.max_backoff_ms);
             continue;
         };
-        const cptr = gpa.create(std.process.Child) catch {
-            sleepMs(io, cfg.check_interval_s * 1000);
-            continue;
-        };
         cptr.* = spawned;
         const pid = pidFromChild(cptr);
-        // Mark our module child alive BEFORE the reaper can clear it; the reaper
-        // (single waiter) flips it false on exit. CASE B/C read this flag, so the
-        // supervisor never double-spawns a live child.
-        g_child_mu.lockUncancelable(io);
+        // Publish our module child before completing the pending command. Both
+        // remain under g_child_mu, so a later command cannot miss this process.
         g_mod_child_alive[sup.idx] = true;
+        g_mod_children[sup.idx] = cptr;
+        if (pending_command != .none) {
+            _ = g_mod_commands.complete(sup.idx, pending_command);
+        }
         g_child_mu.unlock(io);
+        if (pending_command != .none) {
+            traceLine(io, "module {s}: {s} ready; relaunched", .{ mod, @tagName(pending_command) });
+        }
         traceLine(io, "module {s}: up pid {d} as {s}", .{ mod, pid, disguise });
 
         // Detached reaper owns wait() for this child (one-owner-wait); it frees
@@ -1574,7 +1666,10 @@ fn superviseModule(sup: ModuleSup) void {
 fn reapModule(io: Io, gpa: std.mem.Allocator, child_ptr: *std.process.Child, idx: usize, mod: []const u8, start_ts: Io.Timestamp) void {
     const term = child_ptr.wait(io) catch {
         g_child_mu.lockUncancelable(io);
-        g_mod_child_alive[idx] = false;
+        if (g_mod_children[idx] == child_ptr) {
+            g_mod_child_alive[idx] = false;
+            g_mod_children[idx] = null;
+        }
         g_child_mu.unlock(io);
         gpa.destroy(child_ptr);
         return;
@@ -1587,7 +1682,10 @@ fn reapModule(io: Io, gpa: std.mem.Allocator, child_ptr: *std.process.Child, idx
         else => {},
     }
     g_child_mu.lockUncancelable(io);
-    g_mod_child_alive[idx] = false;
+    if (g_mod_children[idx] == child_ptr) {
+        g_mod_child_alive[idx] = false;
+        g_mod_children[idx] = null;
+    }
     g_child_mu.unlock(io);
     gpa.destroy(child_ptr);
 }

@@ -34,6 +34,28 @@ jobs:
       - run: go vet ./...
       - run: go test ./... -count=1
 
+  # Unit-test the rescue command policy and compile every rescue target.
+  rescue:
+    name: rescue (Zig)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Zig
+        run: |
+          set -e
+          ZIG_VERSION=0.16.0
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz" -o /tmp/zig.tar.xz
+          mkdir -p "$HOME/zig"
+          tar -xJf /tmp/zig.tar.xz -C "$HOME/zig" --strip-components=1
+          echo "$HOME/zig" >> "$GITHUB_PATH"
+      - name: Test rescue policies
+        run: |
+          zig test sys0-rescue/src/install_policy_test.zig
+          zig test sys0-rescue/src/progress_policy_test.zig
+          zig test sys0-rescue/src/module_command_policy_test.zig
+      - name: Cross-compile rescue
+        run: make -C sys0-rescue all ZIG=zig
+
   # Cross-compile the agent + hub for every release target.
   crosscompile:
     name: cross-compile
