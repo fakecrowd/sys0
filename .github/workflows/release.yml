@@ -155,6 +155,11 @@ jobs:
           esac
           if [ -n "$ztarget" ]; then
             rescue_asset="sys0-rescue_${VERSION}_${GOOS}_${GOARCH}${ext}"
+            # Zig 0.16's std.Io backend targets Windows 10. Patch only the
+            # ephemeral CI toolchain so rescue keeps running on Windows 7.
+            if [ "$GOOS" = "windows" ]; then
+              python3 sys0-rescue/tools/patch_zig_win7.py "$HOME/zig/lib"
+            fi
             # Bake the hosted-hub defaults + version into the standalone /dl rescue
             # (single-file Zig builds can't take -X linker defines, so patch the
             # source consts in a throwaway copy before compiling).
@@ -171,6 +176,9 @@ jobs:
             [ "$GOOS" = "windows" ] && zig_extra="--subsystem windows"
             ( cd /tmp/rescue-build && zig build-exe src/main.zig -O ReleaseSmall -target "$ztarget" $zig_extra -fstrip --name sys0-rescue )
             mv "/tmp/rescue-build/sys0-rescue${ext}" "$rescue_asset"
+            if [ "$GOOS" = "windows" ]; then
+              python3 sys0-rescue/tools/check_pe_win7_imports.py "$rescue_asset"
+            fi
             echo "RESCUE_ASSET=$rescue_asset" >> "$GITHUB_ENV"
           fi
 

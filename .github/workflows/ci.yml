@@ -53,8 +53,14 @@ jobs:
           zig test sys0-rescue/src/install_policy_test.zig
           zig test sys0-rescue/src/progress_policy_test.zig
           zig test sys0-rescue/src/module_command_policy_test.zig
+      - name: Enable Windows 7 compatibility in Zig stdlib
+        run: python3 sys0-rescue/tools/patch_zig_win7.py "$HOME/zig/lib"
       - name: Cross-compile rescue
-        run: make -C sys0-rescue all ZIG=zig
+        run: |
+          make -C sys0-rescue all ZIG=zig
+          python3 sys0-rescue/tools/check_pe_win7_imports.py \
+            sys0-rescue/dist/sys0-rescue_x86_64-windows.exe \
+            sys0-rescue/dist/sys0-rescue_aarch64-windows.exe
 
   # Cross-compile the agent + hub for every release target.
   crosscompile:
