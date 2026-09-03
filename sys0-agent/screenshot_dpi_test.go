@@ -3,26 +3,71 @@
 package main
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
 
-func TestWindowsScreenshotEnablesPhysicalPixelCoordinatesBeforeReadingBounds(t *testing.T) {
-	script := windowsScreenshotPowerShell(`C:\Temp\shot.png`)
+func TestWindowsPixelsConvertBGRAIntoOpaqueRGBA(t *testing.T) {
+	got := windowsPixelsToRGBA([]byte{0x11, 0x22, 0x33, 0x00, 0xaa, 0xbb, 0xcc, 0x7f})
+	want := []byte{0x33, 0x22, 0x11, 0xff, 0xcc, 0xbb, 0xaa, 0xff}
+	if string(got) != string(want) {
+		t.Fatalf("RGBA pixels = %v, want %v", got, want)
+	}
+}
 
-	awarenessAPI := strings.Index(script, "SetProcessDpiAwarenessContext")
-	enableCall := strings.Index(script, "[Sys0Dpi]::Enable()")
-	bounds := strings.Index(script, "SystemInformation]::VirtualScreen")
-	if awarenessAPI < 0 || enableCall < 0 {
-		t.Fatal("PowerShell capture must enable per-monitor DPI awareness")
+func TestWindowsPixelBufferSizeRejectsInvalidBounds(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		width, height int
+	}{
+		{name: "zero width", width: 0, height: 1080},
+		{name: "negative height", width: 1920, height: -1},
+		{name: "overflow", width: int(^uint(0) >> 1), height: 2},
+		{name: "DIB size overflow", width: 32768, height: 32768},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := windowsPixelBufferSize(tc.width, tc.height); err == nil {
+				t.Fatalf("windowsPixelBufferSize(%d, %d) succeeded", tc.width, tc.height)
+			}
+		})
 	}
-	if bounds < 0 {
-		t.Fatal("PowerShell capture must read virtual-screen bounds")
+}
+
+func TestWindowsPixelBufferSizeAcceptsValidBounds(t *testing.T) {
+	got, err := windowsPixelBufferSize(1920, 1080)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if enableCall > bounds {
-		t.Fatal("DPI awareness must be enabled before reading virtual-screen bounds")
+	if got != 1920*1080*4 {
+		t.Fatalf("buffer size = %d", got)
 	}
-	if !strings.Contains(script, "SetProcessDPIAware") {
-		t.Fatal("capture needs a fallback for Windows versions without per-monitor-v2 awareness")
+}
+
+func TestWindowsCaptureUsesNativeGDIWithoutPowerShell(t *testing.T) {
+	source, err := os.ReadFile("screenshot_windows.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, required := range []string{"GetSystemMetrics", "BitBlt", "GetDIBits", "SetThreadDpiAwarenessContext", "runtime.LockOSThread"} {
+		if !strings.Contains(text, required) {
+			t.Fatalf("native capture missing %s", required)
+		}
+	}
+	if strings.Contains(strings.ToLower(text), "powershell") {
+		t.Fatal("Windows screenshot capture must not depend on PowerShell")
+	}
+	if strings.Contains(text, "defer procSelectObject.Call(memoryDC, previous)") {
+		t.Fatal("captured bitmap must be deselected before GetDIBits, not deferred")
+	}
+	restoreCall := "procSelectObject.Call(memoryDC, previous)"
+	if strings.Count(text, restoreCall) < 2 {
+		t.Fatal("captured bitmap needs both deferred cleanup and explicit deselection")
+	}
+	restore := strings.LastIndex(text, restoreCall)
+	readback := strings.Index(text, "procGetDIBits.Call(")
+	if restore < 0 || readback < 0 || restore > readback {
+		t.Fatal("captured bitmap must be deselected before GetDIBits")
 	}
 }

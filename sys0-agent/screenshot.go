@@ -6,13 +6,11 @@ package main
 //
 // The agent is cross-compiled with CGO_ENABLED=0 for 6 platforms from one Linux
 // runner, so we cannot use cgo-based capture libraries (kbinani/screenshot et al
-// link X11/Cocoa via cgo). Instead we shell out to a capture tool that already
-// ships with the OS (or is commonly present), write a PNG to a temp file, then
-// do all resolution scaling + color compression in pure Go (image, image/jpeg,
-// image/png). This keeps the static binary portable and the scaling/quality
-// knobs identical across platforms.
+// link X11/Cocoa via cgo). Windows uses Win32 GDI directly; Unix platforms call
+// an OS capture tool and write a PNG to a temporary file. Resolution scaling and
+// output compression stay in pure Go (image, image/jpeg, image/png).
 //
-//   Windows : PowerShell + System.Drawing (CopyFromScreen) — always available.
+//   Windows : Win32 GDI virtual-screen capture.
 //   macOS   : /usr/sbin/screencapture -x — built in.
 //   Linux   : first of grim (wlroots/Wayland), scrot, ImageMagick `import`,
 //             gnome-screenshot, spectacle — whatever is installed.
@@ -30,7 +28,6 @@ import (
 	"os/exec"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/fakecrowd/sys0/internal/rpc"
@@ -147,46 +144,31 @@ func capturePNG(display int) ([]byte, string, error) {
 	}
 }
 
-// capturePNGWindows uses PowerShell + System.Drawing to grab the full virtual
-// screen. No external install needed on any modern Windows.
-func windowsScreenshotPowerShell(path string) string {
-	// PowerShell/.NET is DPI-unaware by default. On a 2560x1600 display at
-	// 150% scaling, VirtualScreen otherwise reports 1707x1067 logical units
-	// while CopyFromScreen consumes physical pixels, cropping the right/bottom.
-	// Set the capture thread to Per-Monitor-V2 before querying any bounds. The
-	// process-level and legacy calls keep older Windows releases working.
-	dpiType := `using System; using System.Runtime.InteropServices;
-public static class Sys0Dpi {
-  [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr value);
-  [DllImport("user32.dll")] static extern bool SetProcessDpiAwarenessContext(IntPtr value);
-  [DllImport("user32.dll")] static extern bool SetProcessDPIAware();
-  public static void Enable() {
-    try { SetThreadDpiAwarenessContext(new IntPtr(-4)); return; } catch (EntryPointNotFoundException) {}
-    try { if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return; } catch (EntryPointNotFoundException) {}
-    SetProcessDPIAware();
-  }
-}`
-	safePath := strings.ReplaceAll(path, "'", "''")
-	return `Add-Type -TypeDefinition @'` + "\n" + dpiType + "\n'@;" +
-		`[Sys0Dpi]::Enable();` +
-		`Add-Type -AssemblyName System.Windows.Forms,System.Drawing;` +
-		`$b=[System.Windows.Forms.SystemInformation]::VirtualScreen;` +
-		`$bmp=New-Object System.Drawing.Bitmap($b.Width,$b.Height);` +
-		`$g=[System.Drawing.Graphics]::FromImage($bmp);` +
-		`$g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size);` +
-		`$bmp.Save('` + safePath + `',[System.Drawing.Imaging.ImageFormat]::Png);` +
-		`$g.Dispose();$bmp.Dispose()`
+func windowsPixelBufferSize(width, height int) (int, error) {
+	if width <= 0 || height <= 0 {
+		return 0, fmt.Errorf("invalid virtual screen bounds %dx%d", width, height)
+	}
+	const bytesPerPixel = 4
+	maxBytes := uint64(^uint32(0)) // BITMAPINFOHEADER.SizeImage is a DWORD.
+	maxInt := uint64(^uint(0) >> 1)
+	if maxInt < maxBytes {
+		maxBytes = maxInt
+	}
+	if uint64(width) > maxBytes/bytesPerPixel/uint64(height) {
+		return 0, fmt.Errorf("virtual screen bounds %dx%d exceed capture limit", width, height)
+	}
+	return width * height * bytesPerPixel, nil
 }
 
-func capturePNGWindows(ctx context.Context, path string, _ int) ([]byte, string, error) {
-	ps := windowsScreenshotPowerShell(path)
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps)
-	hideWindow(cmd) // suppress the black console window flash on Windows
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, "", fmt.Errorf("powershell capture: %v: %s", err, out)
+// windowsPixelsToRGBA converts the native 32-bit Windows DIB byte order into
+// the RGBA order expected by image.NRGBA. DIB alpha is undefined, so captures
+// are made fully opaque.
+func windowsPixelsToRGBA(bgra []byte) []byte {
+	rgba := make([]byte, len(bgra))
+	for i := 0; i+3 < len(bgra); i += 4 {
+		rgba[i], rgba[i+1], rgba[i+2], rgba[i+3] = bgra[i+2], bgra[i+1], bgra[i], 0xff
 	}
-	b, err := os.ReadFile(path)
-	return b, "powershell", err
+	return rgba
 }
 
 // capturePNGLinux tries common CLI screenshot tools in order of preference,
