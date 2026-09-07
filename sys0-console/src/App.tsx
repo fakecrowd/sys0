@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { api, getToken, getRole, getUser, setSession, clearSession, eventStream, rememberCreds, forgetCreds, hasRemembered, getRememberedUser, type Node, type RescueInfo, type RescueCommand } from "./api";
+import { api, getToken, getRole, getUser, setSession, clearSession, rememberCreds, forgetCreds, hasRemembered, getRememberedUser, type Node, type RescueInfo, type RescueCommand } from "./api";
 import { Shell } from "./components/Shell";
 import { Tasks } from "./components/Tasks";
 import { Processes } from "./components/Processes";
@@ -17,6 +17,9 @@ import { DOWNLOAD_PATH } from "./downloadNav";
 import { progressSummary } from "./rescueProgress";
 import { Dialogs, confirmDialog, promptDialog, alertDialog } from "./components/dialogs";
 import { WindowManager, type WinApp } from "./WindowManager";
+import { NodeOwnership } from "./components/NodeOwnership";
+import { accessibleFocus } from "./nodeAccess";
+import { useNodeInventory } from "./useNodeInventory";
 import { canFocusNode, clearRecent, migrateLegacyScreenshotHistory } from "./nodeWorkspace";
 
 export function App() {
@@ -114,47 +117,30 @@ function Login({ onAuthed }: { onAuthed: () => void }) {
 }
 
 function Console({ onLogout }: { onLogout: () => void }) {
-  const [nodes, setNodes] = useState<Node[]>([]);
+  const { nodes, live, refresh } = useNodeInventory();
   // Single-focus model (macOS-workspace style): exactly one node is focused at
   // a time; the right-hand content area is its workspace. "" = nothing focused.
   const [focused, setFocused] = useState<string>("");
-  const [live, setLive] = useState<Record<string, any>>({});
   const [navOpen, setNavOpen] = useState(false); // mobile node drawer
   const [acctOpen, setAcctOpen] = useState(false); // account modal (node-independent)
   const [cacheOpen, setCacheOpen] = useState(false); // hub release-binary cache modal
   const isAdmin = getRole() === "admin";
 
-  const refresh = useCallback(async () => {
-    try { const r = await api.nodes(); if (r.ok) setNodes(r.nodes); } catch {}
-  }, []);
-
-  useEffect(() => {
-    refresh();
-    const es = eventStream((type, data) => {
-      if (type === "event.node") refresh();
-      if (type === "event.metrics") setLive((m) => ({ ...m, [data.node]: data.metrics }));
-    });
-    const t = setInterval(refresh, 5000);
-    return () => { es.close(); clearInterval(t); };
-  }, [refresh]);
-
-  // If the focused node disappears (deleted / forgotten), drop focus so the
-  // workspace collapses back to the empty state rather than dangling.
-  useEffect(() => {
-    if (focused && !nodes.some((n) => n.id === focused)) setFocused("");
-  }, [nodes, focused]);
+  // Missing inventory is revoked/deleted, not an offline workspace.
+  const activeFocus = accessibleFocus(nodes, focused);
+  useEffect(() => { if (focused && !activeFocus) setFocused(""); }, [focused, activeFocus]);
 
   const select = (id: string) => {
-    setFocused(id);
+    setFocused(accessibleFocus(nodes, id));
     setNavOpen(false); // reveal the workspace (closes the mobile drawer)
   };
 
-  const focusedNode = nodes.find((n) => n.id === focused);
+  const focusedNode = nodes.find((n) => n.id === activeFocus);
   const focusedOnline = focusedNode?.state === "online";
 
   // Every console surface is a window bound to the FOCUSED node — no in-window
   // node picker, no batch targeting. Admin-only surfaces append conditionally.
-  const apps: WinApp[] = focused ? [
+  const apps: WinApp[] = activeFocus ? [
     { key: "shell", title: "Shell", render: () => <Shell node={focused} online={focusedOnline} /> },
     { key: "tasks", title: "任务", render: () => <Tasks node={focused} online={focusedOnline} /> },
     { key: "proc", title: "进程", render: () => <Processes node={focused} online={focusedOnline} /> },
@@ -194,7 +180,7 @@ function Console({ onLogout }: { onLogout: () => void }) {
           <NodeList nodes={nodes} focused={focused} onSelect={select} live={live} onRefresh={refresh} />
         </div>
         <main className="flex-1 flex flex-col min-w-0">
-          {focused
+          {activeFocus
             ? <>
                 {!focusedOnline && (
                   <div className="mono-sm px-3 py-2" style={{ color: "var(--warn)", borderBottom: "1px solid var(--border)" }}>
@@ -309,7 +295,7 @@ function NodeCard({
     try {
       const latest = await api.nodes();
       const current = latest.ok ? latest.nodes.find((node) => node.id === n.id) : undefined;
-      if (!current || current.state !== "online" || nodeConnectionSignature(current) !== expectedConnection) return;
+      if (!current || !current.canAccess || current.state !== "online" || nodeConnectionSignature(current) !== expectedConnection) return;
       await fn();
       onChanged();
     } catch (e) { alertDialog(String(e), { title: "操作失败" }); }
@@ -337,7 +323,7 @@ function NodeCard({
 
   const offline = n.state === "offline";
   const bootstrapping = n.state === "bootstrapping";
-  const selectable = canFocusNode(n.state);
+  const selectable = n.canAccess === true && canFocusNode(n.state);
 
   return (
     <div className={selectable ? "panel p-2.5 cursor-pointer" : "panel p-2.5"}
@@ -349,7 +335,7 @@ function NodeCard({
         {on && <span className="tag" style={{ color: "var(--accent)", borderColor: "var(--accent)" }}>当前</span>}
         {offline && <span className="tag" style={{ color: "var(--muted)" }}>offline</span>}
         {bootstrapping && <span className="tag" style={{ color: "var(--warn)", borderColor: "var(--warn)" }}>引导中</span>}
-        {n.rescue && (
+        {n.canAccess && n.rescue && (
           <span className="tag cursor-pointer"
             title="点击查看 rescue 守护详情"
             onClick={(e) => { e.stopPropagation(); setRescueOpen((o) => !o); }}
@@ -359,7 +345,9 @@ function NodeCard({
         )}
         <span className="mono-sm ml-auto">{n.id}</span>
       </div>
-      <div className="mono-sm mt-1.5">{n.host.os}/{n.host.arch} · {n.host.ip || "—"}</div>
+      <NodeOwnership node={n} onChanged={onChanged} />
+      {n.canAccess && <>
+      <div className="mono-sm mt-1.5">{n.host?.os}/{n.host?.arch} · {n.host?.ip || "—"}</div>
       <div className="mono-sm mt-1" style={{ color: "var(--muted)" }}>
         agent {n.version || "—"}{n.rescue ? ` · rescue ${n.rescueVersion || "?"}` : ""}
       </div>
@@ -413,6 +401,7 @@ function NodeCard({
             `host ${info.hostname}\nkernel ${info.kernel}\ncpu ${info.cpuModel} x${info.cpuCount}\nmem ${(info.memTotal / 1e9).toFixed(1)}G\nup ${(info.uptimeSec / 3600).toFixed(1)}h`}
         </pre>
       )}
+      </>}
     </div>
   );
 }

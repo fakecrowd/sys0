@@ -21,6 +21,7 @@ import (
 // Node is a persisted agent record (survives disconnects).
 type Node struct {
 	ID           string `gorm:"primaryKey"`
+	OwnerID      uint   `gorm:"index;not null;default:0"`
 	Label        string
 	Fingerprint  string `gorm:"uniqueIndex"`
 	Tags         string
@@ -53,6 +54,7 @@ type Setting struct {
 type APIKey struct {
 	ID          string `gorm:"primaryKey"`
 	Name        string
+	OwnerID     uint   `gorm:"index"`
 	Owner       string `gorm:"index"` // username; live role/node permissions come from this account
 	SecretHash  string
 	MethodScope string // optional per-key narrowing; never expands the owner's permissions
@@ -107,10 +109,13 @@ func OpenStore(path string) (*Store, error) {
 	if sqlDB, err := db.DB(); err == nil {
 		sqlDB.SetMaxOpenConns(1) // serialize writes for sqlite
 	}
-	if err := db.AutoMigrate(&Node{}, &User{}, &Setting{}, &APIKey{}, &Audit{}, &Sample{}); err != nil {
+	if err := db.AutoMigrate(&Node{}, &User{}, &Setting{}, &APIKey{}, &Audit{}, &Sample{}, &NodeAccess{}); err != nil {
 		return nil, err
 	}
 	s := &Store{db: db}
+	if err := s.migrateNodeACL(); err != nil {
+		return nil, err
+	}
 	if err := s.backfillLegacyKeyOwners(); err != nil {
 		return nil, err
 	}
@@ -158,32 +163,37 @@ func randHexS(n int) string {
 // node (or backfills an empty label). Host facts (OS/arch/kernel/ip/version)
 // are refreshed from the agent on every connect.
 func (s *Store) UpsertNode(fp, label, addr string, host wire.HostSummary, version string) (id string, isNew bool, effLabel, effTags string, err error) {
-	now := time.Now().Unix()
-	var n Node
-	e := s.db.Where("fingerprint = ?", fp).First(&n).Error
-	if errors.Is(e, gorm.ErrRecordNotFound) {
-		n = Node{ID: "n" + fp[:6], Fingerprint: fp, FirstSeen: now}
-		isNew = true
-	} else if e != nil {
-		return "", false, "", "", e
+	if len(fp) < 6 {
+		return "", false, "", "", fmt.Errorf("invalid fingerprint")
 	}
-	// Only seed the label from the agent for a new node or when no operator
-	// label has ever been set; never clobber an operator-assigned alias.
-	if isNew || n.Label == "" {
-		n.Label = label
-	}
-	n.LastAddr = addr
-	n.OS = host.OS
-	n.Arch = host.Arch
-	n.Kernel = host.Kernel
-	n.IP = host.IP
-	n.AgentVersion = version
-	n.State = "online"
-	n.LastSeen = now
-	if err := s.db.Clauses(clause.OnConflict{UpdateAll: true}).Save(&n).Error; err != nil {
-		return "", false, "", "", err
-	}
-	return n.ID, isNew, n.Label, n.Tags, nil
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now().Unix()
+		var n Node
+		e := tx.Where("fingerprint = ?", fp).First(&n).Error
+		if errors.Is(e, gorm.ErrRecordNotFound) {
+			n = Node{ID: "n" + fp[:6], Fingerprint: fp, FirstSeen: now, Label: label}
+			// INSERT, never an upsert by truncated ID: a collision is not this agent.
+			if e = tx.Create(&n).Error; e != nil {
+				return e
+			}
+			isNew = true
+		} else if e != nil {
+			return e
+		}
+		updates := map[string]any{"last_addr": addr, "os": host.OS, "arch": host.Arch, "kernel": host.Kernel, "ip": host.IP, "agent_version": version, "state": "online", "last_seen": now}
+		if n.Label == "" {
+			updates["label"] = label
+			n.Label = label
+		}
+		// Agent reconnects never write owner_id, tags or a nonempty operator label.
+		if e = tx.Model(&Node{}).Where("id = ? AND fingerprint = ?", n.ID, fp).Updates(updates).Error; e != nil {
+			return e
+		}
+		id, effLabel, effTags = n.ID, n.Label, n.Tags
+		return nil
+	})
+	return
+
 }
 
 func (s *Store) SetNodeState(id, state string) error {
@@ -205,7 +215,15 @@ func (s *Store) ListNodeRecords() ([]Node, error) {
 
 // DeleteNode removes a persisted node record (used to forget an offline node).
 func (s *Store) DeleteNode(id string) error {
-	return s.db.Where("id = ?", id).Delete(&Node{}).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("node_id = ?", id).Delete(&NodeAccess{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("node_id = ?", id).Delete(&Sample{}).Error; err != nil {
+			return err
+		}
+		return tx.Where("id = ?", id).Delete(&Node{}).Error
+	})
 }
 
 // ---- users ----
@@ -219,11 +237,30 @@ type UserRecord struct {
 	CreatedAt int64    `json:"createdAt"`
 }
 
-func userView(u User) UserRecord {
-	return UserRecord{
-		ID: u.ID, Username: u.Username, Role: u.Role,
-		NodeScope: splitScope(u.NodeScope), CreatedAt: u.CreatedAt,
+func (s *Store) userView(u User) (UserRecord, error) {
+	var grants []NodeAccess
+	if err := s.db.Where("user_id = ?", u.ID).Order("node_id").Find(&grants).Error; err != nil {
+		return UserRecord{}, err
 	}
+	scope := []string{}
+	seen := map[string]bool{}
+	for _, g := range grants {
+		if !seen[g.NodeID] {
+			scope = append(scope, g.NodeID)
+			seen[g.NodeID] = true
+		}
+	}
+	var owned []Node
+	if err := s.db.Where("owner_id = ?", u.ID).Order("id").Find(&owned).Error; err != nil {
+		return UserRecord{}, err
+	}
+	for _, n := range owned {
+		if !seen[n.ID] {
+			scope = append(scope, n.ID)
+			seen[n.ID] = true
+		}
+	}
+	return UserRecord{ID: u.ID, Username: u.Username, Role: u.Role, NodeScope: scope, CreatedAt: u.CreatedAt}, nil
 }
 
 // CountUsers returns how many users exist (0 => first-run setup needed).
@@ -242,13 +279,18 @@ func (s *Store) CreateUser(username, secret, role string, nodeScope []string) (U
 		Username:   username,
 		SecretHash: hashSecret(secret),
 		Role:       role,
-		NodeScope:  strings.Join(nodeScope, ","),
+		NodeScope:  "",
 		CreatedAt:  time.Now().Unix(),
 	}
-	if err := s.db.Create(&u).Error; err != nil {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&u).Error; err != nil {
+			return err
+		}
+		return replaceUserGrants(tx, u.ID, nodeScope)
+	}); err != nil {
 		return UserRecord{}, err
 	}
-	return userView(u), nil
+	return s.userView(u)
 }
 
 // EnsureUser creates the user only if it does not already exist (seed helper).
@@ -270,7 +312,8 @@ func (s *Store) AuthUser(username, secret string) (UserRecord, bool) {
 	if !verifySecret(secret, u.SecretHash) {
 		return UserRecord{}, false
 	}
-	return userView(u), true
+	v, err := s.userView(u)
+	return v, err == nil
 }
 
 // GetUser fetches a user record by username.
@@ -279,7 +322,8 @@ func (s *Store) GetUser(username string) (UserRecord, bool) {
 	if err := s.db.Where("username = ?", username).First(&u).Error; err != nil {
 		return UserRecord{}, false
 	}
-	return userView(u), true
+	v, err := s.userView(u)
+	return v, err == nil
 }
 
 // GetUserByID fetches a user record by primary key.
@@ -288,7 +332,8 @@ func (s *Store) GetUserByID(id uint) (UserRecord, bool) {
 	if err := s.db.Where("id = ?", id).First(&u).Error; err != nil {
 		return UserRecord{}, false
 	}
-	return userView(u), true
+	v, err := s.userView(u)
+	return v, err == nil
 }
 
 func (s *Store) ListUsers() ([]UserRecord, error) {
@@ -298,14 +343,24 @@ func (s *Store) ListUsers() ([]UserRecord, error) {
 	}
 	out := make([]UserRecord, 0, len(users))
 	for _, u := range users {
-		out = append(out, userView(u))
+		v, err := s.userView(u)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
 	}
 	return out, nil
 }
 
 // UpdateUserScope sets the node scope (host access list) for a user.
 func (s *Store) UpdateUserScope(id uint, nodeScope []string) error {
-	return s.db.Model(&User{}).Where("id = ?", id).Update("node_scope", strings.Join(nodeScope, ",")).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var u User
+		if err := tx.First(&u, id).Error; err != nil {
+			return err
+		}
+		return replaceUserGrants(tx, id, nodeScope)
+	})
 }
 
 // UpdateUserRole sets a user's role (admin|member).
@@ -313,7 +368,18 @@ func (s *Store) UpdateUserRole(id uint, role string) error {
 	if role != "admin" {
 		role = "member"
 	}
-	return s.db.Model(&User{}).Where("id = ?", id).Update("role", role).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var u User
+		if err := tx.First(&u, id).Error; err != nil {
+			return err
+		}
+		if u.Role == "admin" && role != "admin" {
+			if err := protectLastAdmin(tx); err != nil {
+				return err
+			}
+		}
+		return tx.Model(&User{}).Where("id = ?", id).Update("role", role).Error
+	})
 }
 
 // SetUserPassword updates a user's password hash.
@@ -321,19 +387,7 @@ func (s *Store) SetUserPassword(id uint, secret string) error {
 	return s.db.Model(&User{}).Where("id = ?", id).Update("secret_hash", hashSecret(secret)).Error
 }
 
-func (s *Store) DeleteUser(id uint) error {
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		var u User
-		if err := tx.First(&u, id).Error; err != nil {
-			return err
-		}
-		if err := tx.Model(&APIKey{}).Where("owner = ? AND revoked_at = 0", u.Username).
-			Update("revoked_at", time.Now().Unix()).Error; err != nil {
-			return err
-		}
-		return tx.Delete(&u).Error
-	})
-}
+func (s *Store) DeleteUser(id uint) error { return s.DeleteUserAs(id, 0) }
 
 // CountAdmins returns the number of admin users (guard against deleting the last one).
 func (s *Store) CountAdmins() int64 {
@@ -344,29 +398,26 @@ func (s *Store) CountAdmins() int64 {
 
 // GrantNodeToUsers appends nodeID to the NodeScope of the given usernames
 // (used when a new node joins, per the default-access policy).
+// Legacy internal bridge: writes ONLY the canonical grants, never CSV.
 func (s *Store) GrantNodeToUsers(nodeID string, usernames []string) {
-	for _, name := range usernames {
-		var u User
-		if err := s.db.Where("username = ?", name).First(&u).Error; err != nil {
-			continue
-		}
-		if u.Role == "admin" {
-			continue // admins already see everything
-		}
-		scope := splitScope(u.NodeScope)
-		already := false
-		for _, n := range scope {
-			if n == nodeID {
-				already = true
-				break
+	s.db.Transaction(func(tx *gorm.DB) error {
+		for _, name := range usernames {
+			var u User
+			if err := tx.Where("username = ?", name).First(&u).Error; err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					continue
+				}
+				return err
+			}
+			if u.Role == "admin" {
+				continue
+			}
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&NodeAccess{NodeID: nodeID, UserID: u.ID}).Error; err != nil {
+				return err
 			}
 		}
-		if already {
-			continue
-		}
-		scope = append(scope, nodeID)
-		s.db.Model(&User{}).Where("id = ?", u.ID).Update("node_scope", strings.Join(scope, ","))
-	}
+		return nil
+	})
 }
 
 // ---- settings ----
@@ -390,6 +441,7 @@ type KeyRecord struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
 	Owner       string `json:"owner"`
+	OwnerID     uint   `json:"-"`
 	MethodScope string `json:"methodScope"`
 	CreatedAt   int64  `json:"createdAt"`
 	RevokedAt   int64  `json:"revokedAt"`
@@ -401,7 +453,7 @@ type KeyRecord struct {
 
 func keyView(k APIKey) KeyRecord {
 	return KeyRecord{
-		ID: k.ID, Name: k.Name, Owner: k.Owner, MethodScope: k.MethodScope,
+		ID: k.ID, Name: k.Name, Owner: k.Owner, OwnerID: k.OwnerID, MethodScope: k.MethodScope,
 		CreatedAt: k.CreatedAt, RevokedAt: k.RevokedAt,
 		legacyRole: k.Role, legacyNodeScope: k.NodeScope, legacyAllowDangerous: k.AllowDangerous,
 	}
@@ -418,27 +470,18 @@ func (s *Store) backfillLegacyKeyOwners() error {
 		}
 		return err
 	}
-	return s.db.Model(&APIKey{}).Where("owner = '' OR owner IS NULL").Update("owner", admin.Username).Error
+	if err := s.db.Model(&APIKey{}).Where("owner = '' OR owner IS NULL").Update("owner", admin.Username).Error; err != nil {
+		return err
+	}
+	return s.db.Exec("UPDATE api_keys SET owner_id = COALESCE((SELECT id FROM users WHERE users.username = api_keys.owner), 0) WHERE owner_id IS NULL OR owner_id = 0").Error
 }
 
 func (s *Store) CreateAccountKey(owner, name string, methodScope []string, rate int) (string, KeyRecord, error) {
-	if _, ok := s.GetUser(owner); !ok {
-		return "", KeyRecord{}, fmt.Errorf("owner not found")
+	u, ok := s.GetUser(owner)
+	if !ok {
+		return "", KeyRecord{}, errUnknownUser
 	}
-	name = strings.TrimSpace(name)
-	if name == "" {
-		name = "mcp-http"
-	}
-	if rate < 0 {
-		rate = 0
-	}
-	secret := "sk_" + randHexS(20)
-	k := APIKey{ID: "k" + randHexS(4), Name: name, Owner: owner, SecretHash: hashSecret(secret),
-		MethodScope: strings.Join(methodScope, ","), RateLimit: rate, CreatedAt: time.Now().Unix()}
-	if err := s.db.Create(&k).Error; err != nil {
-		return "", KeyRecord{}, err
-	}
-	return secret, keyView(k), nil
+	return s.CreateAccountKeyByUserID(u.ID, name, methodScope, rate)
 }
 
 func (s *Store) AuthKey(secret string) (KeyRecord, bool) {
@@ -467,15 +510,11 @@ func (s *Store) ListKeys() ([]KeyRecord, error) {
 }
 
 func (s *Store) ListKeysForOwner(owner string) ([]KeyRecord, error) {
-	var keys []APIKey
-	if err := s.db.Where("owner = ? AND revoked_at = 0", owner).Order("created_at desc").Find(&keys).Error; err != nil {
-		return nil, err
+	u, ok := s.GetUser(owner)
+	if !ok {
+		return nil, errUnknownUser
 	}
-	out := make([]KeyRecord, 0, len(keys))
-	for _, k := range keys {
-		out = append(out, keyView(k))
-	}
-	return out, nil
+	return s.ListKeysForUserID(u.ID)
 }
 
 func (s *Store) RevokeKey(id string) error {
@@ -483,9 +522,11 @@ func (s *Store) RevokeKey(id string) error {
 }
 
 func (s *Store) RevokeKeyForOwner(id, owner string) (bool, error) {
-	r := s.db.Model(&APIKey{}).Where("id = ? AND owner = ? AND revoked_at = 0", id, owner).
-		Update("revoked_at", time.Now().Unix())
-	return r.RowsAffected == 1, r.Error
+	u, ok := s.GetUser(owner)
+	if !ok {
+		return false, errUnknownUser
+	}
+	return s.RevokeKeyForUserID(id, u.ID)
 }
 
 // ---- audit ----

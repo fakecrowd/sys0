@@ -6,16 +6,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-HTTP_PORT=18090
-TCP_PORT=17010
-DB=/tmp/sys0_e2e.db
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/sys0-e2e.XXXXXX")
+read -r HTTP_PORT TCP_PORT < <(python3 -c 'import socket; a=socket.socket(); b=socket.socket(); a.bind(("127.0.0.1",0)); b.bind(("127.0.0.1",0)); print(a.getsockname()[1],b.getsockname()[1])')
+DB="$TMP/hub.db"
 KEY=testkey
 B="http://127.0.0.1:${HTTP_PORT}"
 PIDS=()
 
 cleanup() {
-  for p in "${PIDS[@]:-}"; do kill -9 "$p" 2>/dev/null || true; done
-  rm -f "$DB"
+  for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
+  for p in "${PIDS[@]:-}"; do wait "$p" 2>/dev/null || true; done
+  rm -rf "$TMP"
 }
 trap cleanup EXIT
 
@@ -30,17 +31,16 @@ go build -o bin/sys0-agent ./sys0-agent/
 echo "== start hub =="
 rm -f "$DB"
 SYS0_ADMIN_USER=admin SYS0_ADMIN_PASS=admin ./bin/sys0-hub -http ":${HTTP_PORT}" -agent-tcp ":${TCP_PORT}" -key "$KEY" -db "$DB" \
-  -jwt-secret e2esecret >/tmp/sys0_e2e_hub.log 2>&1 &
+  -jwt-secret e2esecret >"$TMP/hub.log" 2>&1 &
 PIDS+=($!)
-sleep 1
+curl -fsS --retry 30 --retry-delay 1 --retry-connrefused "$B/api/v1/setup/status" > /dev/null
 
 echo "== start agents (tcp + ws) =="
-mkdir -p /tmp/sys0_e2e_d1 /tmp/sys0_e2e_d2
-./bin/sys0-agent -hub "127.0.0.1:${TCP_PORT}" -transport tcp -key "$KEY" -label e2e-tcp -heartbeat 5 -data-dir /tmp/sys0_e2e_d1 >/tmp/sys0_e2e_a1.log 2>&1 &
+mkdir -p "$TMP/agent1" "$TMP/agent2"
+./bin/sys0-agent -hub "127.0.0.1:${TCP_PORT}" -transport tcp -key "$KEY" -label e2e-tcp -heartbeat 5 -data-dir "$TMP/agent1" >"$TMP/agent1.log" 2>&1 &
 PIDS+=($!)
-./bin/sys0-agent -hub "127.0.0.1:${HTTP_PORT}" -transport ws -key "$KEY" -label e2e-ws -heartbeat 5 -data-dir /tmp/sys0_e2e_d2 >/tmp/sys0_e2e_a2.log 2>&1 &
+./bin/sys0-agent -hub "127.0.0.1:${HTTP_PORT}" -transport ws -key "$KEY" -label e2e-ws -heartbeat 5 -data-dir "$TMP/agent2" >"$TMP/agent2.log" 2>&1 &
 PIDS+=($!)
-sleep 2
 
 echo "== login =="
 TOKEN=$(curl -s -X POST "$B/api/v1/auth/login" -d '{"username":"admin","password":"admin"}' | jq_py 'd["token"]')
@@ -48,7 +48,11 @@ TOKEN=$(curl -s -X POST "$B/api/v1/auth/login" -d '{"username":"admin","password
 AUTH="Authorization: Bearer $TOKEN"
 
 echo "== nodes online (expect 2) =="
-N=$(curl -s -H "$AUTH" "$B/api/v1/nodes" | jq_py 'len(d["nodes"])')
+for attempt in $(seq 1 100); do
+  N=$(curl -fsS -H "$AUTH" "$B/api/v1/nodes" | jq_py 'len(d["nodes"])')
+  [ "$N" = "2" ] && break
+  sleep 0.2
+done
 [ "$N" = "2" ] || fail "expected 2 nodes, got $N"
 
 echo "== dispatch shell.run broadcast =="
@@ -66,9 +70,9 @@ OS=$(curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
 echo "== fs.put + fs.get round-trip =="
 DATA=$(printf 'roundtrip-ok' | base64)
 curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
-  -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"fs.put\",\"params\":{\"path\":\"/tmp/sys0_e2e_file\",\"data\":\"$DATA\"}}}" >/dev/null
+  -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"fs.put\",\"params\":{\"path\":\"$TMP/roundtrip-file\",\"data\":\"$DATA\"}}}" >/dev/null
 GOT=$(curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
-  -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"fs.get\",\"params\":{\"path\":\"/tmp/sys0_e2e_file\"}}}" \
+  -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"fs.get\",\"params\":{\"path\":\"$TMP/roundtrip-file\"}}}" \
   | python3 -c 'import sys,json,base64;print(base64.b64decode(json.load(sys.stdin)["items"][0]["value"]["data"]).decode())')
 [ "$GOT" = "roundtrip-ok" ] || fail "fs round-trip = $GOT"
 
@@ -117,8 +121,11 @@ curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
 echo "== node.shutdown -> offline =="
 curl -s -H "$AUTH" -X POST "$B/api/v1/dispatch" \
   -d "{\"select\":{\"nodes\":[\"$NID\"]},\"call\":{\"method\":\"node.shutdown\"}}" >/dev/null
-sleep 1
-ONLINE=$(curl -s -H "$AUTH" "$B/api/v1/nodes" | jq_py 'sum(1 for n in d["nodes"] if n["state"]=="online")')
+for attempt in $(seq 1 100); do
+  ONLINE=$(curl -fsS -H "$AUTH" "$B/api/v1/nodes" | jq_py 'sum(1 for n in d["nodes"] if n["state"]=="online")')
+  [ "$ONLINE" = "1" ] && break
+  sleep 0.2
+done
 [ "$ONLINE" = "1" ] || fail "expected 1 online node after shutdown, got $ONLINE"
 
 echo ""

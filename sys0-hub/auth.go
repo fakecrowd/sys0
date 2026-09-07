@@ -14,15 +14,16 @@ import (
 
 type tokenClaims struct {
 	Sub  string `json:"sub"`
+	UID  uint   `json:"uid"`
 	Role string `json:"role"`
 	Exp  int64  `json:"exp"`
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
 
-func (h *Hub) signToken(sub, role string, ttl time.Duration) string {
+func (h *Hub) signUserToken(u UserRecord, ttl time.Duration) string {
 	header := b64([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	pc, _ := json.Marshal(tokenClaims{Sub: sub, Role: role, Exp: time.Now().Add(ttl).Unix()})
+	pc, _ := json.Marshal(tokenClaims{Sub: u.Username, UID: u.ID, Role: u.Role, Exp: time.Now().Add(ttl).Unix()})
 	payload := b64(pc)
 	signing := header + "." + payload
 	mac := hmac.New(sha256.New, []byte(h.cfg.JWTSecret))
@@ -74,13 +75,13 @@ func (h *Hub) actorFromRequest(r *http.Request) (Actor, bool) {
 		if !ok || rec.Owner == "" {
 			return Actor{}, false
 		}
-		u, found := h.store.GetUser(rec.Owner)
+		u, found := h.store.GetUserByID(rec.OwnerID)
 		if !found {
 			return Actor{}, false
 		}
 		isAdmin := u.Role == "admin"
 		scopeAll, nodeScope := isAdmin, u.NodeScope
-		allowDangerous := isAdmin
+		allowDangerous := true
 		// Keys created before account ownership could carry narrower node and
 		// dangerous-method restrictions. Preserve those as an intersection during
 		// migration; they may only reduce the owner's live permissions.
@@ -93,26 +94,28 @@ func (h *Hub) actorFromRequest(r *http.Request) (Actor, bool) {
 					nodeScope = intersectScope(u.NodeScope, legacyScope)
 				}
 			}
-			allowDangerous = isAdmin && rec.legacyAllowDangerous
+			allowDangerous = rec.legacyAllowDangerous
 		}
 		return Actor{
-			Kind: "key", ID: rec.ID, Role: u.Role,
+			Kind: "key", ID: rec.ID, UserID: u.ID, Role: u.Role,
+			live:     func() (Actor, bool) { return h.actorFromRequest(r) },
 			ScopeAll: scopeAll, NodeScope: nodeScope,
 			MethodScope: splitScope(rec.MethodScope), AllowDangerous: allowDangerous,
 		}, true
 	}
 	// JWT path — resolve the live user so role/scope changes take effect.
 	if c, ok := h.verifyToken(tok); ok {
-		u, found := h.store.GetUser(c.Sub)
+		u, found := h.store.GetUserByID(c.UID)
 		if !found {
 			return Actor{}, false // user deleted since token issued
 		}
 		isAdmin := u.Role == "admin"
 		return Actor{
-			Kind: "user", ID: u.Username, Role: u.Role,
+			Kind: "user", ID: u.Username, UserID: u.ID, Role: u.Role,
+			live:           func() (Actor, bool) { return h.actorFromRequest(r) },
 			ScopeAll:       isAdmin,     // admins see every node
 			NodeScope:      u.NodeScope, // members restricted to their list
-			AllowDangerous: isAdmin,     // only admins may run dangerous methods
+			AllowDangerous: true,        // binary node access includes dangerous operations
 		}, true
 	}
 	return Actor{}, false

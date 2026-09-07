@@ -36,11 +36,12 @@ func (h *Hub) apiSetup(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "username required and password must be at least 6 characters"})
 		return
 	}
-	if _, err := h.store.CreateUser(body.Username, body.Password, "admin", nil); err != nil {
+	u, err := h.store.SetupAdminRecord(body.Username, body.Password)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	tok := h.signToken(body.Username, "admin", 12*time.Hour)
+	tok := h.signUserToken(u, 12*time.Hour)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "token": tok, "role": "admin", "username": body.Username})
 }
 
@@ -48,7 +49,7 @@ func (h *Hub) apiSetup(c *gin.Context) {
 
 func (h *Hub) apiMe(c *gin.Context) {
 	a := actorOf(c)
-	u, ok := h.store.GetUser(a.ID)
+	u, ok := h.store.GetUserByID(a.UserID)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "user not found"})
 		return
@@ -57,22 +58,21 @@ func (h *Hub) apiMe(c *gin.Context) {
 }
 
 func (h *Hub) apiChangeOwnPassword(c *gin.Context) {
+	if actorOf(c).Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
 	var body struct{ OldPassword, NewPassword string }
 	if c.BindJSON(&body) != nil {
 		return
 	}
 	a := actorOf(c)
-	if _, ok := h.store.AuthUser(a.ID, body.OldPassword); !ok {
-		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "current password incorrect"})
-		return
-	}
 	if len(body.NewPassword) < 6 {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "new password must be at least 6 characters"})
 		return
 	}
-	u, _ := h.store.GetUser(a.ID)
-	if err := h.store.SetUserPassword(u.ID, body.NewPassword); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
+	if err := h.store.ChangeOwnPassword(a.UserID, body.OldPassword, body.NewPassword); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
@@ -201,7 +201,7 @@ func (h *Hub) apiDeleteUser(c *gin.Context) {
 			return
 		}
 	}
-	if err := h.store.DeleteUser(id); err != nil {
+	if err := h.store.DeleteUserAs(id, actorOf(c).UserID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
 	}

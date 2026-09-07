@@ -1,4 +1,4 @@
-.PHONY: all web hub agent build test e2e run-hub run-agent clean
+.PHONY: all web hub agent build test e2e e2e-ownership run-hub run-agent clean
 
 # Rolling version: build timestamp yyyyMMddhhmm
 VERSION ?= $(shell date -u +%Y%m%d%H%M)
@@ -26,6 +26,9 @@ test:
 # End-to-end smoke test against the real binaries (builds Go, not the web).
 e2e:
 	bash scripts/e2e.sh
+
+e2e-ownership: hub agent
+	python3 scripts/ownership_e2e.py --bin-dir bin
 
 run-hub: hub
 	./bin/sys0-hub -http :8080 -agent-tcp :7000 -key devkey

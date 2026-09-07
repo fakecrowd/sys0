@@ -23,6 +23,26 @@ export function canFocusNode(state: string): boolean {
   return state !== "bootstrapping";
 }
 
+// Inventory authorization fences cleanup/throttled writers after revocation.
+const nodeAccess = new WeakMap<StorageLike, Map<string, Set<string>>>();
+export function setRecentNodeAccess(storage: StorageLike, account: string, allowed: string[]): void {
+  const accounts = nodeAccess.get(storage) || new Map<string, Set<string>>();
+  const ids = new Set(allowed);
+  accounts.set(account, ids);
+  nodeAccess.set(storage, accounts);
+  const prefix = `${RECENT_PREFIX}${encodeURIComponent(account)}:`;
+  for (const key of keys(storage)) {
+    if (key.startsWith(prefix) && !ids.has(key.slice(prefix.length).split(":")[0])) {
+      try { storage.removeItem(key); } catch {}
+    }
+  }
+}
+
+function nodeIsAccessible(storage: StorageLike, account: string, node: string): boolean {
+  const allowed = nodeAccess.get(storage)?.get(account);
+  return !allowed || allowed.has(node);
+}
+
 function recentKey(account: string, node: string, surface: string): string {
   return `${RECENT_PREFIX}${encodeURIComponent(account)}:${node}:${surface}`;
 }
@@ -106,7 +126,7 @@ export function clearRecent(storage: StorageLike): void {
 }
 
 export function saveRecent<T>(storage: StorageLike, account: string, node: string, surface: string, data: T, now = Date.now()): boolean {
-  if (!accountIsActive(storage, account)) return false;
+  if (!accountIsActive(storage, account) || !nodeIsAccessible(storage, account, node)) return false;
   const key = recentKey(account, node, surface);
   const raw = JSON.stringify({ savedAt: now, data });
   if (raw.length > RECENT_MAX_BYTES) {
@@ -139,7 +159,7 @@ export function saveRecent<T>(storage: StorageLike, account: string, node: strin
 }
 
 export function loadRecent<T>(storage: StorageLike, account: string, node: string, surface: string, now = Date.now()): RecentValue<T> | null {
-  if (!accountIsActive(storage, account)) return null;
+  if (!accountIsActive(storage, account) || !nodeIsAccessible(storage, account, node)) return null;
   const key = recentKey(account, node, surface);
   try {
     const raw = storage.getItem(key);

@@ -53,18 +53,22 @@ type ModuleView struct {
 
 // NodeView is the JSON shape returned to clients.
 type NodeView struct {
-	ID            string           `json:"id"`
-	Label         string           `json:"label"`
-	Tags          []string         `json:"tags"`
-	Host          wire.HostSummary `json:"host"`
-	Version       string           `json:"version"`
-	State         string           `json:"state"`
-	LastSeen      int64            `json:"lastSeen"`
-	AgentCwd      string           `json:"agentCwd,omitempty"` // agent's working directory
-	AgentPid      int              `json:"agentPid,omitempty"` // agent's own pid
-	Modules       []ModuleView     `json:"modules,omitempty"`  // per-module connection state
-	Rescue        bool             `json:"rescue"`        // a sys0-rescue is supervising this node
-	RescueVersion string           `json:"rescueVersion"` // reported rescue build
+	Owner           string           `json:"owner"`
+	CanClaim        bool             `json:"canClaim"`
+	CanManageAccess bool             `json:"canManageAccess"`
+	CanAccess       bool             `json:"canAccess"`
+	ID              string           `json:"id"`
+	Label           string           `json:"label"`
+	Tags            []string         `json:"tags"`
+	Host            wire.HostSummary `json:"host"`
+	Version         string           `json:"version"`
+	State           string           `json:"state"`
+	LastSeen        int64            `json:"lastSeen"`
+	AgentCwd        string           `json:"agentCwd,omitempty"` // agent's working directory
+	AgentPid        int              `json:"agentPid,omitempty"` // agent's own pid
+	Modules         []ModuleView     `json:"modules,omitempty"`  // per-module connection state
+	Rescue          bool             `json:"rescue"`             // a sys0-rescue is supervising this node
+	RescueVersion   string           `json:"rescueVersion"`      // reported rescue build
 	// RescueInfo is the full live rescue status (phase/detail/restarts/…) for
 	// the console detail view; nil when no fresh rescue report exists.
 	RescueInfo *rescueView `json:"rescueInfo,omitempty"`
@@ -249,6 +253,7 @@ func nodeViewFromRescue(id string, rs rescueView) NodeView {
 
 // consoleSession is a live console/operator connection over WebSocket.
 type consoleSession struct {
+	filter func(string, json.RawMessage) (json.RawMessage, bool)
 	peer   *rpc.Peer
 	mu     sync.Mutex
 	topics map[string]bool
@@ -388,7 +393,13 @@ func (r *Registry) broadcast(topic, method string, payload any) {
 	}
 	r.mu.RUnlock()
 	for _, c := range targets {
-		c.peer.Notify(method, json.RawMessage(data))
+		if c.filter == nil {
+			continue
+		}
+		filtered, allowed := c.filter(method, data)
+		if allowed {
+			c.peer.Notify(method, filtered)
+		}
 	}
 	for _, s := range subs {
 		select {

@@ -35,6 +35,8 @@ type HubConfig struct {
 // Actor identifies who is invoking dispatch and what they may do.
 type Actor struct {
 	Kind           string // user | key
+	UserID         uint
+	live           func() (Actor, bool)
 	ID             string
 	Role           string
 	ScopeAll       bool     // true = may access every node (admins, unrestricted keys)
@@ -43,7 +45,18 @@ type Actor struct {
 	AllowDangerous bool
 }
 
+func (a Actor) refreshed() (Actor, bool) {
+	if a.live != nil {
+		return a.live()
+	}
+	return a, true
+}
 func (a Actor) nodeAllowed(id string) bool {
+	var ok bool
+	a, ok = a.refreshed()
+	if !ok {
+		return false
+	}
 	if a.ScopeAll {
 		return true
 	}
@@ -56,6 +69,11 @@ func (a Actor) nodeAllowed(id string) bool {
 }
 
 func (a Actor) methodAllowed(m string) bool {
+	var ok bool
+	a, ok = a.refreshed()
+	if !ok {
+		return false
+	}
 	if len(a.MethodScope) == 0 {
 		return true
 	}
@@ -112,14 +130,16 @@ func (h *Hub) ListNodes() []NodeView {
 // ListNodesFor returns the fleet visible to a given actor (admins/ScopeAll see
 // all; members see only nodes in their allow-list).
 func (h *Hub) ListNodesFor(actor Actor) []NodeView {
-	all := h.ListNodes()
-	if actor.ScopeAll {
-		return all
+	out := []NodeView{}
+	var ok bool
+	actor, ok = actor.refreshed()
+	if !ok {
+		return out
 	}
-	out := make([]NodeView, 0, len(all))
-	for _, v := range all {
-		if actor.nodeAllowed(v.ID) {
-			out = append(out, v)
+	for _, v := range h.ListNodes() {
+		view, visible := h.nodeViewFor(actor, v)
+		if visible {
+			out = append(out, view)
 		}
 	}
 	return out
@@ -130,6 +150,10 @@ func (h *Hub) resolve(sel wire.Select, actor Actor) (targets []*nodeGroup, offli
 	switch {
 	case len(sel.Nodes) > 0:
 		for _, id := range sel.Nodes {
+			if !actor.nodeAllowed(id) {
+				offline = append(offline, wire.DispatchItem{Node: id, OK: false, Error: &wire.DispatchError{Code: rpc.CodeForbidden, Message: "node not permitted"}})
+				continue
+			}
 			if g := h.reg.get(id); g != nil {
 				targets = append(targets, g)
 			} else {
@@ -164,6 +188,11 @@ func (h *Hub) resolve(sel wire.Select, actor Actor) (targets []*nodeGroup, offli
 
 // Dispatch fans a call out to selected nodes and aggregates results.
 func (h *Hub) Dispatch(ctx context.Context, actor Actor, p wire.DispatchParams) (wire.DispatchResult, *rpc.Error) {
+	var authenticated bool
+	actor, authenticated = actor.refreshed()
+	if !authenticated {
+		return wire.DispatchResult{}, rpc.Errorf(rpc.CodeForbidden, "unauthorized")
+	}
 	started := time.Now()
 	method := p.Call.Method
 
