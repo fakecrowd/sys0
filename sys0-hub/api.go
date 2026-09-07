@@ -51,7 +51,7 @@ func (h *Hub) Router() http.Handler {
 	// --- REST API v1 ---
 	v1 := r.Group("/api/v1")
 	v1.POST("/auth/login", h.apiLogin)
-	v1.GET("/methods", h.apiMethods)
+	v1.GET("/methods", h.authMW(), h.apiMethods)
 	v1.GET("/setup/status", h.apiSetupStatus)
 	v1.POST("/setup", h.apiSetup)
 	v1.GET("/releases", h.apiReleases)           // public: agent download list (/dl page)
@@ -66,6 +66,9 @@ func (h *Hub) Router() http.Handler {
 	auth.POST("/me/keys", h.apiCreateOwnKey)
 	auth.DELETE("/me/keys/:id", h.apiRevokeOwnKey)
 	auth.GET("/nodes", h.apiNodes)
+	auth.POST("/nodes/:id/claim", h.apiNodeClaim)
+	auth.GET("/nodes/:id/access", h.apiGetNodeAccess)
+	auth.POST("/nodes/:id/access", h.apiSetNodeAccess)
 	auth.GET("/nodes/:id", h.apiNode)
 	auth.POST("/nodes/:id/label", h.apiNodeLabel)
 	auth.POST("/nodes/:id/detach", h.apiNodeDetach)
@@ -74,8 +77,8 @@ func (h *Hub) Router() http.Handler {
 	auth.DELETE("/nodes/:id", h.apiNodeDelete)
 	auth.POST("/dispatch", h.apiDispatch)
 	auth.GET("/metrics", h.apiMetrics)
-	auth.GET("/cache", h.apiCacheStatus) // hub release-binary cache status
-	auth.GET("/audit", h.apiAudit)
+	auth.GET("/cache", h.requireHumanAdmin(), h.apiCacheStatus) // hub release-binary cache status
+	auth.GET("/audit", h.requireHumanAdmin(), h.apiAudit)
 	auth.GET("/events", h.apiEvents)
 
 	admin := v1.Group("", h.adminMW())
@@ -83,12 +86,12 @@ func (h *Hub) Router() http.Handler {
 	admin.DELETE("/keys/:id", h.apiRevokeKey)
 	admin.GET("/users", h.apiListUsers)
 	admin.POST("/users", h.apiCreateUser)
-	admin.POST("/users/:id/scope", h.apiUserScope)
+	admin.POST("/users/:id/scope", retiredAccessRoute)
 	admin.POST("/users/:id/role", h.apiUserRole)
 	admin.POST("/users/:id/password", h.apiUserPassword)
 	admin.DELETE("/users/:id", h.apiDeleteUser)
-	admin.GET("/settings/default-access", h.apiGetDefaultAccess)
-	admin.POST("/settings/default-access", h.apiSetDefaultAccess)
+	admin.GET("/settings/default-access", retiredAccessRoute)
+	admin.POST("/settings/default-access", retiredAccessRoute)
 	admin.POST("/cache/refresh", h.apiCacheRefresh) // force re-pull latest release binaries
 
 	// --- MCP (reuse the net/http handler) ---
@@ -139,7 +142,7 @@ func (h *Hub) authMW() gin.HandlerFunc {
 func (h *Hub) adminMW() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		actor, ok := h.actorFromRequest(c.Request)
-		if !ok || actor.Role != "admin" {
+		if !ok || actor.Role != "admin" || actor.Kind != "user" {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"ok": false, "error": "admin required"})
 			return
 		}
@@ -167,12 +170,19 @@ func (h *Hub) apiLogin(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"ok": false, "error": "invalid credentials"})
 		return
 	}
-	tok := h.signToken(u.Username, u.Role, 12*time.Hour)
+	tok := h.signUserToken(u, 12*time.Hour)
 	c.JSON(http.StatusOK, gin.H{"ok": true, "token": tok, "role": u.Role, "username": u.Username})
 }
 
 func (h *Hub) apiMethods(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"ok": true, "methods": wire.NodeMethods})
+	methods := []wire.MethodSpec{}
+	a := actorOf(c)
+	for _, m := range wire.NodeMethods {
+		if a.methodAllowed(m.Name) && (!m.Dangerous || a.AllowDangerous) {
+			methods = append(methods, m)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "methods": methods})
 }
 
 func (h *Hub) apiNodes(c *gin.Context) {
@@ -184,15 +194,20 @@ func (h *Hub) apiNode(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
 		return
 	}
-	s := h.reg.get(c.Param("id"))
-	if s == nil {
-		c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "node not found or offline"})
-		return
+	for _, v := range h.ListNodesFor(actorOf(c)) {
+		if v.ID == c.Param("id") {
+			c.JSON(http.StatusOK, gin.H{"ok": true, "node": v})
+			return
+		}
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "node": s.view()})
+	c.JSON(http.StatusNotFound, gin.H{"ok": false, "error": "node not found"})
 }
 
 func (h *Hub) apiNodeLabel(c *gin.Context) {
+	if actorOf(c).Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
 	if !actorOf(c).nodeAllowed(c.Param("id")) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
 		return
@@ -221,6 +236,10 @@ func (h *Hub) apiNodeLabel(c *gin.Context) {
 }
 
 func (h *Hub) apiNodeDetach(c *gin.Context) {
+	if actorOf(c).Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
 	if !actorOf(c).nodeAllowed(c.Param("id")) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
 		return
@@ -233,7 +252,7 @@ func (h *Hub) apiNodeDetach(c *gin.Context) {
 
 func (h *Hub) apiNodeDelete(c *gin.Context) {
 	id := c.Param("id")
-	if !actorOf(c).nodeAllowed(id) {
+	if !h.canManageNode(actorOf(c), id) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
 		return
 	}
@@ -256,6 +275,10 @@ func (h *Hub) apiNodeDelete(c *gin.Context) {
 // with a 90s TTL, so plain deletion can't clear it. Dismissing drops the report
 // and ignores further reports for that id for rescueDismissWindow.
 func (h *Hub) apiNodeDismissRescue(c *gin.Context) {
+	if actorOf(c).Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
 	id := c.Param("id")
 	if !actorOf(c).nodeAllowed(id) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
@@ -270,6 +293,10 @@ func (h *Hub) apiNodeDismissRescue(c *gin.Context) {
 // buffered and delivered on the rescue's next /rescue/report poll; the result
 // comes back on a later report and surfaces in the node's rescueInfo.commands.
 func (h *Hub) apiNodeRescueCommand(c *gin.Context) {
+	if actorOf(c).Kind != "user" {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
+		return
+	}
 	id := c.Param("id")
 	if !actorOf(c).nodeAllowed(id) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node not permitted"})
@@ -335,6 +362,10 @@ func (h *Hub) apiMetrics(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "node required"})
 		return
 	}
+	if !actorOf(c).nodeAllowed(node) || !actorOf(c).methodAllowed(wire.MethodHostWatch) {
+		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "node or method not permitted"})
+		return
+	}
 	from, _ := strconv.ParseInt(c.Query("from"), 10, 64)
 	to, _ := strconv.ParseInt(c.Query("to"), 10, 64)
 	samples, err := h.store.QuerySamples(node, from, to)
@@ -377,9 +408,20 @@ func (h *Hub) apiEvents(c *gin.Context) {
 		case <-c.Request.Context().Done():
 			return
 		case <-ping.C:
+			if _, ok := actorOf(c).refreshed(); !ok {
+				return
+			}
 			c.Writer.WriteString(": ping\n\n")
 			c.Writer.Flush()
 		case m := <-sub.ch:
+			if _, ok := actorOf(c).refreshed(); !ok {
+				return
+			}
+			data, allowed := h.filterEvent(actorOf(c), m.Method, m.Data)
+			if !allowed {
+				continue
+			}
+			m.Data = data
 			c.Writer.WriteString("event: " + m.Method + "\ndata: ")
 			c.Writer.Write(m.Data)
 			c.Writer.WriteString("\n\n")
@@ -394,7 +436,7 @@ func (h *Hub) apiListOwnKeys(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
 		return
 	}
-	keys, err := h.store.ListKeysForOwner(a.ID)
+	keys, err := h.store.ListKeysForUserID(a.UserID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
@@ -441,7 +483,7 @@ func (h *Hub) apiCreateOwnKey(c *gin.Context) {
 			return
 		}
 	}
-	secret, rec, err := h.store.CreateAccountKey(a.ID, body.Name, methods, 0)
+	secret, rec, err := h.store.CreateAccountKeyByUserID(a.UserID, body.Name, methods, 0)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
@@ -455,7 +497,7 @@ func (h *Hub) apiRevokeOwnKey(c *gin.Context) {
 		c.JSON(http.StatusForbidden, gin.H{"ok": false, "error": "account login required"})
 		return
 	}
-	changed, err := h.store.RevokeKeyForOwner(c.Param("id"), a.ID)
+	changed, err := h.store.RevokeKeyForUserID(c.Param("id"), a.UserID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"ok": false, "error": err.Error()})
 		return
@@ -511,7 +553,9 @@ func (h *Hub) serveStatic(c *gin.Context) {
 // --- console WS handler (JSON-RPC over the persistent connection) ---
 
 func (h *Hub) serveConsole(conn transport.Conn, actor Actor) {
-	sess := &consoleSession{topics: map[string]bool{}}
+	sess := &consoleSession{topics: map[string]bool{}, filter: func(method string, data json.RawMessage) (json.RawMessage, bool) {
+		return h.filterEvent(actor, method, data)
+	}}
 	sess.peer = rpc.NewPeer(conn, h.consoleHandler(sess, actor), nil)
 	// Preserve ordering of interactive input coming from the browser. Each
 	// keystroke is a separate "dispatch" request wrapping an inner call (e.g.
@@ -547,6 +591,13 @@ func consoleAsync(method string, params json.RawMessage) bool {
 
 func (h *Hub) consoleHandler(sess *consoleSession, actor Actor) rpc.Handler {
 	return func(ctx context.Context, method string, params json.RawMessage) (any, *rpc.Error) {
+		actor, ok := actor.refreshed()
+		if !ok {
+			return nil, rpc.Errorf(rpc.CodeForbidden, "unauthorized")
+		}
+		if (method == "hub.label" || method == "hub.detach") && actor.Kind != "user" {
+			return nil, rpc.Errorf(rpc.CodeForbidden, "method not permitted")
+		}
 		switch method {
 		case "dispatch":
 			var p wire.DispatchParams
@@ -568,7 +619,11 @@ func (h *Hub) consoleHandler(sess *consoleSession, actor Actor) rpc.Handler {
 			if s == nil {
 				return nil, rpc.Errorf(rpc.CodeOffline, "node offline")
 			}
-			return s.view(), nil
+			v, visible := h.nodeViewFor(actor, s.view())
+			if !visible {
+				return nil, rpc.Errorf(rpc.CodeForbidden, "node not permitted")
+			}
+			return v, nil
 		case "hub.label":
 			var p struct {
 				Node  string   `json:"node"`

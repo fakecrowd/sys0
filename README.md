@@ -21,7 +21,8 @@ AI Agent 的机器接口（HTTP API + 内置 MCP Server）。
 - **编码统一 JSON-RPC 2.0**：请求/响应/通知三态，`internal/rpc` 实现多路复用 Peer。
 - **dispatch 寻址**：控制台/API 不直接寻址被控端，发 `{select, call}`，由 Hub 扇出 + 结果聚合。
 - **AI Agent 友好**：`GET /api/v1/methods` 自描述（JSON Schema 可作 LLM tool）+ `/mcp` 内置 MCP Server。
-- **API Key 护栏**：节点范围 / 方法白名单 / 危险方法默认禁用 / dryRun 预检；全量审计。
+- **账号与节点权限**：实例 owner 创建账号，已登录用户认领未归属节点；节点 owner 管理访问授权。
+- **API Key 护栏**：账号密钥随账号当前节点权限变化，方法白名单进一步缩小范围；支持 dryRun 预检和审计。
 
 ## 快速开始
 
@@ -36,10 +37,21 @@ make build
 ./bin/sys0-agent -hub 127.0.0.1:7000 -transport tcp -key devkey -label lab-a
 ./bin/sys0-agent -hub 127.0.0.1:8080 -transport ws  -key devkey -label lab-b
 
-# 4. 浏览器打开 http://localhost:8080 ，默认账号 admin / admin
+# 4. 浏览器打开 http://localhost:8080 ，首次访问创建实例 owner 账号
 ```
 
 仅后端（无需 Node）：`go build -o bin/sys0-hub ./sys0-hub/`（仓库已包含构建好的 `sys0-hub/web`）。
+
+## 多用户与节点归属
+
+- 首次初始化的管理员即 **实例 owner**（内部角色仍为 `admin`），可创建、管理账号，查看并管理任何节点的访问权限。不开放公共注册。
+- 未归属节点显示 **认领** 按钮。任何已登录账号均可认领；同时认领时只有一个账号成功。认领后成为该节点的 **节点 owner**。
+- 节点 owner 通过 **访问权限** 允许或禁止其他账号访问。权限为二元授权：允许即可以操作节点；获授权用户不能再授权或修改节点归属。
+- 节点 owner 和实例 owner 始终有访问权，不能通过访问列表取消。API key 不能认领节点或管理权限；账号密钥仅在账号当前可访问节点范围内生效，方法限制仍然生效。
+- 未授权账号仅能发现未归属节点的必要信息，不能操作；已归属且未授权的节点不可见。撤权后，后续 API/WS 请求及实时事件不再提供该节点数据。
+- 删除账号时，其持有的节点交给执行删除的实例 owner，不会变为公开可认领；同名重建账号不会恢复原账号的归属或权限。最后一个实例 owner 不能被删除或降级。
+
+升级会保留现有账号、节点和明确的节点访问授权；已有节点初始为未归属状态。旧的“新节点默认授权用户”策略停止自动授权，新节点通过认领和节点访问权限管理。迁移只运行一次，已撤销权限不会在重启后复活。升级前签发的登录令牌需重新登录；账号密码和 API key 保留。
 
 ## 被控端数据目录与身份
 
@@ -72,6 +84,7 @@ make build
 ```bash
 make test   # Go 单元/集成测试
 make e2e    # 端到端：启动 hub + 两个 agent，驱动 REST/MCP 并断言
+make e2e-ownership # 多账号、并发认领、授权/撤权、密钥与同名账号隔离
 ```
 
 ## HTTP API 摘要
@@ -79,7 +92,10 @@ make e2e    # 端到端：启动 hub + 两个 agent，驱动 REST/MCP 并断言
 | 端点 | 说明 |
 | --- | --- |
 | `POST /api/v1/auth/login` | 登录，返回 JWT |
-| `GET /api/v1/nodes` | 在线节点列表 |
+| `GET /api/v1/nodes` | 当前账号可访问的节点与可认领节点 |
+| `POST /api/v1/nodes/:id/claim` | 已登录账号认领节点，JSON `{}` |
+| `GET /api/v1/nodes/:id/access` | 节点 owner / 实例 owner 查看访问权限 |
+| `POST /api/v1/nodes/:id/access` | 替换显式授权用户，JSON `{"users":["username"]}` |
 | `POST /api/v1/dispatch` | 同步下发 `{select, call, dryRun}` |
 | `GET /api/v1/methods` | 能力自描述（JSON Schema） |
 | `GET /api/v1/metrics?node=` | 监控时序 |

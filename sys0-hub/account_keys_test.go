@@ -11,6 +11,9 @@ import (
 
 func TestAccountKeyInheritsLiveOwnerPermissions(t *testing.T) {
 	s := newTestStore(t)
+	if _, err := s.CreateUser("remaining-root", "password", "admin", nil); err != nil {
+		t.Fatal(err)
+	}
 	alice, err := s.CreateUser("alice", "secret1", "member", []string{"n1"})
 	if err != nil {
 		t.Fatal(err)
@@ -30,7 +33,7 @@ func TestAccountKeyInheritsLiveOwnerPermissions(t *testing.T) {
 	if !ok {
 		t.Fatal("account key did not authenticate")
 	}
-	if actor.Role != "member" || actor.ScopeAll || !actor.nodeAllowed("n1") || actor.nodeAllowed("n2") || actor.AllowDangerous {
+	if actor.Role != "member" || actor.ScopeAll || !actor.nodeAllowed("n1") || actor.nodeAllowed("n2") || !actor.AllowDangerous {
 		t.Fatalf("member actor=%+v", actor)
 	}
 	if len(actor.MethodScope) != 1 || actor.MethodScope[0] != "host.info" {

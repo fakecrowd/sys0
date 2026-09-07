@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, getRole, getUser, type Node } from "../api";
+import { roleLabel } from "../nodeAccess";
 import { Accounts } from "./Accounts";
 import { Keys } from "./Keys";
 import { alertDialog } from "./dialogs";
@@ -22,7 +23,7 @@ export function AccountModal({ nodes, onClose }: { nodes: Node[]; onClose: () =>
           <div className="flex items-center gap-2">
             <span className="dot" style={{ background: "var(--accent)" }} />
             <span style={{ color: "var(--accent)" }}>账户 / account</span>
-            <span className="mono-sm">· {getUser()}（{getRole()}）</span>
+            <span className="mono-sm">· {getUser()}（{roleLabel(getRole())}）</span>
           </div>
           <button className="wm-btn wm-close" title="关闭" onClick={onClose} style={{ width: 26, height: 24 }}>✕</button>
         </div>
@@ -74,8 +75,7 @@ function SelfAccount() {
         {me && (
           <div className="panel p-3 mono-sm" style={{ lineHeight: 1.7 }}>
             <div>用户名 · {me.username}</div>
-            <div>角色 · {me.role}</div>
-            {me.role !== "admin" && <div>可访问节点 · {me.nodeScope?.length || 0} 个</div>}
+            <div>角色 · {roleLabel(me.role)}</div>
           </div>
         )}
         <div className="panel p-3 space-y-2">

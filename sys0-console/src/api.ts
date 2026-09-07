@@ -43,6 +43,10 @@ export type ModuleView = {
 export type Node = {
   id: string;
   label: string;
+  owner: string;
+  canClaim: boolean;
+  canManageAccess: boolean;
+  canAccess: boolean;
   tags: string[];
   host: { name: string; os: string; arch: string; kernel: string; ip: string };
   version: string;
@@ -157,7 +161,7 @@ async function req<T>(method: string, path: string, body?: any, _retried = false
     location.reload();
     throw new Error("unauthorized");
   }
-  return res.json() as Promise<T>;
+  return { ...await res.json(), httpStatus: res.status } as T;
 }
 
 export type AccountKey = {
@@ -169,6 +173,10 @@ export type AccountKey = {
   revokedAt: number;
 };
 
+export type NodeAccessUser = { id: number; username: string; allowed: boolean; role?: string };
+export type NodeAccess = { ok: boolean; owner: string; users: NodeAccessUser[]; error?: string; httpStatus?: number };
+export type MutationResult = { ok: boolean; error?: string; httpStatus?: number };
+
 export type Select = { nodes?: string[]; tags?: string[]; all?: boolean };
 
 export const api = {
@@ -179,6 +187,9 @@ export const api = {
       { username, password }
     ),
   nodes: () => req<{ ok: boolean; nodes: Node[] }>("GET", "/api/v1/nodes"),
+  claimNode: (id: string) => req<MutationResult & { node?: Node }>("POST", `/api/v1/nodes/${encodeURIComponent(id)}/claim`, {}),
+  nodeAccess: (id: string) => req<NodeAccess>("GET", `/api/v1/nodes/${encodeURIComponent(id)}/access`),
+  setNodeAccess: (id: string, users: string[]) => req<MutationResult>("POST", `/api/v1/nodes/${encodeURIComponent(id)}/access`, { users }),
   methods: () => req<{ ok: boolean; methods: MethodSpec[] }>("GET", "/api/v1/methods"),
   dispatch: (select: Select, method: string, params: any = {}, dryRun = false) =>
     req<{ ok: boolean; items?: DispatchItem[]; error?: string; code?: number }>(
@@ -280,8 +291,8 @@ export type CacheStatus = {
 // SSE stream of live node/metrics events.
 export function eventStream(onEvent: (type: string, data: any) => void): EventSource {
   const tok = getToken() ?? "";
-  const es = new EventSource(`/api/v1/events?topics=node,metrics&token=${encodeURIComponent(tok)}`);
-  for (const name of ["event.node", "event.metrics"]) {
+  const es = new EventSource(`/api/v1/events?topics=node,metrics,access&token=${encodeURIComponent(tok)}`);
+  for (const name of ["event.node", "event.metrics", "event.access"]) {
     es.addEventListener(name, (e) => {
       try { onEvent(name, JSON.parse((e as MessageEvent).data)); } catch {}
     });

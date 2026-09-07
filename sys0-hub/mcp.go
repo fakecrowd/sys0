@@ -135,6 +135,11 @@ func (h *Hub) mcpResourcesRead(w http.ResponseWriter, req rpc.Message, actor Act
 	case "sys0://nodes":
 		payload = h.ListNodesFor(actor)
 	case "sys0://audit":
+		live, ok := actor.refreshed()
+		if !ok || live.Role != "admin" || live.Kind != "user" {
+			writeJSON(w, http.StatusOK, jrpcErr(req.ID, rpc.CodeForbidden, "instance owner account required"))
+			return
+		}
 		payload, _ = h.store.ListAudit(50)
 	default:
 		writeJSON(w, http.StatusOK, jrpcErr(req.ID, rpc.CodeBadParams, "unknown resource"))
