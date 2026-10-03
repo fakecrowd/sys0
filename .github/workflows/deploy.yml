@@ -1,10 +1,8 @@
 name: Deploy (prod)
 
-# GitOps deployment to jp09:
-#   1. Build the runtime image and upload it as an ephemeral Actions artifact.
-#   2. Load that image directly into Portainer endpoint 4.
-#   3. Git-redeploy repository stack 48 (`sys0-jp09`) from the
-#      private deployment repository without a registry pull.
+# Build the production artifact. Runtime is managed by the Kubernetes
+# manifest in server-deploy/kubernetes/us/personal/sys0.json.
+# Do not redeploy the retired JP09 Portainer stack.
 on:
   push:
     branches: [deploy/prod]
@@ -48,47 +46,3 @@ jobs:
           path: /tmp/sys0-image.tar.gz
           retention-days: 1
           if-no-files-found: error
-
-  deploy:
-    needs: build-image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: sys0-runtime-image
-          path: /tmp/sys0-runtime-image
-      - name: Load image into jp09
-        env:
-          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
-          PORTAINER_ORIGIN_IP: ${{ secrets.PORTAINER_ORIGIN_IP }}
-          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-          ENDPOINT: "4"
-        run: |
-          set -euo pipefail
-          host="${PORTAINER_URL#https://}"
-          host="${host%%/*}"
-          gzip -dc /tmp/sys0-runtime-image/sys0-image.tar.gz > /tmp/sys0-image.tar
-          curl --fail --show-error --silent --http1.1 --noproxy '*' \
-            --resolve "${host}:443:${PORTAINER_ORIGIN_IP}" \
-            -H "X-API-Key: ${PORTAINER_API_KEY}" \
-            -H 'Content-Type: application/x-tar' \
-            --data-binary @/tmp/sys0-image.tar \
-            "${PORTAINER_URL}/api/endpoints/${ENDPOINT}/docker/images/load?quiet=1"
-      - name: Deploy to jp09 via Portainer GitOps
-        env:
-          PORTAINER_URL: ${{ secrets.PORTAINER_URL }}
-          PORTAINER_ORIGIN_IP: ${{ secrets.PORTAINER_ORIGIN_IP }}
-          PORTAINER_API_KEY: ${{ secrets.PORTAINER_API_KEY }}
-          DEPLOY_REPO_TOKEN: ${{ secrets.DEPLOY_REPO_TOKEN }}
-          ENDPOINT: "4"
-          STACK: "48"
-          IMAGE: ghcr.io/fakecrowd/sys0-runtime
-          SKIP_IMAGE_PULL: "1"
-        run: |
-          set -euo pipefail
-          test -n "$PORTAINER_URL"
-          test -n "$PORTAINER_ORIGIN_IP"
-          test -n "$PORTAINER_API_KEY"
-          test -n "$DEPLOY_REPO_TOKEN"
-          python3 .github/scripts/portainer_deploy.py

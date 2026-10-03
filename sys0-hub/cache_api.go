@@ -50,8 +50,8 @@ func (h *Hub) apiCacheStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, buildCacheStatus())
 }
 
-// apiCacheRefresh forces a re-fetch of the latest release list AND re-pulls
-// every agent/rescue binary into the cache, so a freshly-built release is served
+// apiCacheRefresh forces a re-fetch of the latest release list and fetches missing
+// agent/rescue binaries into the cache, so a freshly-built release is served
 // immediately. Admin-only (it triggers outbound GitHub fetches). Returns the
 // post-refresh cache status.
 func (h *Hub) apiCacheRefresh(c *gin.Context) {
@@ -66,13 +66,13 @@ func (h *Hub) apiCacheRefresh(c *gin.Context) {
 		c.JSON(http.StatusBadGateway, gin.H{"ok": false, "error": err.Error()})
 		return
 	}
-	// Force-pull every asset URL (bypassing the freshness check) so the cache
-	// holds the newest bytes right now.
+	// Refresh metadata, but reuse immutable assets already cached.
 	urls := assetBinaryURLs(payload)
+	pruneBinaryCache(urls)
 	refreshed := 0
 	var failed []string
 	for _, u := range urls {
-		if _, _, perr := pullBinary(u); perr != nil {
+		if _, _, perr := fetchBinary(u); perr != nil {
 			failed = append(failed, u)
 			continue
 		}
@@ -133,7 +133,7 @@ func buildCacheStatus() cacheStatusView {
 		}
 		av := cachedAssetView{Name: a.Name, Kind: a.Kind, OS: a.OS, Arch: a.Arch, URL: a.URL}
 		binCacheMu.Lock()
-		if e, ok := binCache[a.URL]; ok && time.Since(e.fetched) < binCacheTTL {
+		if e, ok := binCache[a.URL]; ok {
 			av.Cached = true
 			av.Size = len(e.body)
 			av.AgeSec = int64(time.Since(e.fetched).Seconds())

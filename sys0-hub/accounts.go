@@ -13,6 +13,7 @@ import (
 
 	"github.com/fakecrowd/sys0/internal/wire"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/sync/singleflight"
 )
 
 // ---- first-run setup ----
@@ -408,22 +409,52 @@ var (
 	binCache   = map[string]binCacheEntry{}
 )
 
-const binCacheTTL = 30 * time.Minute
+var binaryDownloads singleflight.Group
+
+// Versioned release URLs are immutable; only metadata has a TTL.
 const binMaxSize = 64 << 20 // 64 MiB per asset hard cap
 
 // fetchBinary returns the asset bytes for url, served from binCache when fresh
-// (within binCacheTTL) and otherwise pulled from GitHub via pullBinary. This is
+// (regardless of age) and otherwise pulled from GitHub via pullBinary. This is
 // the node-facing hot path (serveBinary); the cache warmer keeps entries fresh
 // so this almost always hits memory instead of a slow hub->GitHub fetch.
 func fetchBinary(url string) ([]byte, string, error) {
-	binCacheMu.Lock()
-	if e, ok := binCache[url]; ok && time.Since(e.fetched) < binCacheTTL {
-		body, ctype := e.body, e.ctype
-		binCacheMu.Unlock()
-		return body, ctype, nil
+	cached := func() (binCacheEntry, bool) {
+		binCacheMu.Lock()
+		defer binCacheMu.Unlock()
+		e, ok := binCache[url]
+		return e, ok
 	}
-	binCacheMu.Unlock()
-	return pullBinary(url)
+	if e, ok := cached(); ok {
+		return e.body, e.ctype, nil
+	}
+	result, err, _ := binaryDownloads.Do(url, func() (any, error) {
+		if e, ok := cached(); ok {
+			return e, nil
+		}
+		body, ctype, err := pullBinary(url)
+		return binCacheEntry{body: body, ctype: ctype}, err
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	e := result.(binCacheEntry)
+	return e.body, e.ctype, nil
+}
+
+// Retain only the current release to bound memory across upgrades.
+func pruneBinaryCache(urls []string) {
+	keep := make(map[string]bool, len(urls))
+	for _, u := range urls {
+		keep[u] = true
+	}
+	binCacheMu.Lock()
+	defer binCacheMu.Unlock()
+	for u := range binCache {
+		if !keep[u] {
+			delete(binCache, u)
+		}
+	}
 }
 
 // pullBinary unconditionally downloads a release asset URL server-side,
@@ -441,9 +472,12 @@ func pullBinary(url string) ([]byte, string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", fmt.Errorf("upstream status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, binMaxSize))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, binMaxSize+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("read binary: %w", err)
+	}
+	if len(body) > binMaxSize {
+		return nil, "", fmt.Errorf("binary exceeds size limit")
 	}
 	ctype := resp.Header.Get("Content-Type")
 	if ctype == "" {
@@ -458,8 +492,8 @@ func pullBinary(url string) ([]byte, string, error) {
 // ---- release binary cache warmer ----
 
 const (
-	binWarmInterval = 5 * time.Minute  // how often the warmer checks freshness
-	binWarmMaxAge   = 20 * time.Minute // re-pull assets older than this (< binCacheTTL so a cached asset never lapses while nodes are pulling)
+	binWarmInterval = 5 * time.Minute // how often the warmer checks freshness
+
 )
 
 // assetBinaryURLs returns the download URLs of all agent+rescue assets in the
@@ -488,9 +522,8 @@ func assetBinaryURLs(payload []byte) []string {
 // downloads (sys0-rescue pulling the ~6.7MB agent, operators using /dl) are
 // always served from the hub's memory instead of triggering a slow hub->GitHub
 // fetch mid-stream (the #1 cause of multi-minute downloads). It pre-warms on
-// startup and refreshes every binWarmInterval, re-pulling any asset older than
-// binWarmMaxAge. When a new release lands the asset URLs change, so stale
-// entries age out at binCacheTTL and the new ones get warmed automatically.
+// startup and checks metadata every binWarmInterval. Only missing versioned
+// URLs are downloaded; cached bytes never expire with time. Old releases are pruned.
 // Blocking; run in its own goroutine.
 func startBinaryWarmer(log *slog.Logger) {
 	warm := func() {
@@ -500,16 +533,16 @@ func startBinaryWarmer(log *slog.Logger) {
 			return
 		}
 		urls := assetBinaryURLs(payload)
+		pruneBinaryCache(urls)
 		refreshed := 0
 		for _, u := range urls {
 			binCacheMu.Lock()
-			e, ok := binCache[u]
-			fresh := ok && time.Since(e.fetched) < binWarmMaxAge
+			_, fresh := binCache[u]
 			binCacheMu.Unlock()
 			if fresh {
 				continue
 			}
-			if _, _, err := pullBinary(u); err != nil {
+			if _, _, err := fetchBinary(u); err != nil {
 				log.Warn("binary warmer: pull failed", "url", u, "err", err)
 				continue
 			}
